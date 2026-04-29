@@ -10,6 +10,8 @@ use std::sync::Arc;
 use clap::Parser;
 use tokio::net::TcpListener;
 use tracing::info;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use backend::connection::DuckDBConnection;
@@ -47,14 +49,19 @@ fn init_logging(logfile: Option<&str>) {
         }
         let file = std::fs::File::create(&log_path).expect("Failed to create log file");
         let (non_blocking, _guard) = tracing_appender::non_blocking(file);
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
+
+        let stdout_layer = tracing_subscriber::fmt::layer();
+        let file_layer = tracing_subscriber::fmt::layer()
             .with_writer(non_blocking)
-            .with_ansi(false)
+            .with_ansi(false);
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stdout_layer)
+            .with(file_layer)
             .init();
+
         info!("Logging to file: {}", log_path.display());
-        // _guard would drop and flush the writer, so we intentionally leak it
-        // to keep the non-blocking writer alive for the lifetime of the process.
         std::mem::forget(_guard);
     } else {
         tracing_subscriber::fmt()
