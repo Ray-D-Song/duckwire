@@ -1,0 +1,7 @@
+/target
+
+*.db
+*.wal
+duckwire.log
+
+.DS_Store
