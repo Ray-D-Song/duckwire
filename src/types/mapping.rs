@@ -52,13 +52,12 @@ pub fn arrow_type_to_pg(dt: &DataType) -> Result<Type, DuckWireError> {
 
 pub fn build_field_info(name: &str, dt: &DataType) -> Result<FieldInfo, DuckWireError> {
     let pg_type = arrow_type_to_pg(dt)?;
-    Ok(FieldInfo::new(
-        name.into(),
-        None,
-        None,
-        pg_type,
-        FieldFormat::Text,
-    ))
+    let format = match pg_type {
+        Type::BOOL | Type::INT2 | Type::INT4 | Type::INT8
+        | Type::FLOAT4 | Type::FLOAT8 => FieldFormat::Binary,
+        _ => FieldFormat::Text,
+    };
+    Ok(FieldInfo::new(name.into(), None, None, pg_type, format))
 }
 
 pub fn build_schema_from_columns(
@@ -79,26 +78,21 @@ pub fn encode_duckdb_value(
     encoder: &mut DataRowEncoder,
     value_ref: ValueRef<'_>,
 ) -> Result<(), DuckWireError> {
+    let e = |err: pgwire::error::PgWireError| DuckWireError::Protocol(err.to_string());
     match value_ref {
-        ValueRef::Null => {
-            encoder.encode_field(&None::<i32>)
-                .map_err(|e| DuckWireError::Protocol(e.to_string()))
-        }
-        ValueRef::Boolean(b) => {
-            let s = if b { "t" } else { "f" };
-            encode_text(encoder, s)
-        }
-        ValueRef::TinyInt(i) => encode_text(encoder, &i.to_string()),
-        ValueRef::SmallInt(i) => encode_text(encoder, &i.to_string()),
-        ValueRef::Int(i) => encode_text(encoder, &i.to_string()),
-        ValueRef::BigInt(i) => encode_text(encoder, &i.to_string()),
+        ValueRef::Null => encoder.encode_field(&None::<i32>).map_err(e),
+        ValueRef::Boolean(b) => encoder.encode_field(&b).map_err(e),
+        ValueRef::TinyInt(i) => encoder.encode_field(&(i as i16)).map_err(e),
+        ValueRef::SmallInt(i) => encoder.encode_field(&i).map_err(e),
+        ValueRef::Int(i) => encoder.encode_field(&i).map_err(e),
+        ValueRef::BigInt(i) => encoder.encode_field(&i).map_err(e),
+        ValueRef::Float(f) => encoder.encode_field(&f).map_err(e),
+        ValueRef::Double(f) => encoder.encode_field(&f).map_err(e),
         ValueRef::HugeInt(i) => encode_text(encoder, &i.to_string()),
         ValueRef::UTinyInt(i) => encode_text(encoder, &i.to_string()),
         ValueRef::USmallInt(i) => encode_text(encoder, &i.to_string()),
         ValueRef::UInt(i) => encode_text(encoder, &i.to_string()),
         ValueRef::UBigInt(i) => encode_text(encoder, &i.to_string()),
-        ValueRef::Float(f) => encode_text(encoder, &f.to_string()),
-        ValueRef::Double(f) => encode_text(encoder, &f.to_string()),
         ValueRef::Decimal(d) => encode_text(encoder, &d.to_string()),
         // Manual Gregorian calendar conversion from epoch microseconds.
         // DuckDB timestamps are stored as micros since 1970-01-01 UTC.
