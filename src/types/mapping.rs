@@ -52,12 +52,7 @@ pub fn arrow_type_to_pg(dt: &DataType) -> Result<Type, DuckWireError> {
 
 pub fn build_field_info(name: &str, dt: &DataType) -> Result<FieldInfo, DuckWireError> {
     let pg_type = arrow_type_to_pg(dt)?;
-    let format = match pg_type {
-        Type::BOOL | Type::INT2 | Type::INT4 | Type::INT8
-        | Type::FLOAT4 | Type::FLOAT8 => FieldFormat::Binary,
-        _ => FieldFormat::Text,
-    };
-    Ok(FieldInfo::new(name.into(), None, None, pg_type, format))
+    Ok(FieldInfo::new(name.into(), None, None, pg_type, FieldFormat::Text))
 }
 
 pub fn build_schema_from_columns(
