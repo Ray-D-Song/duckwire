@@ -45,7 +45,7 @@ jobs:
           shared-key: release-${{ matrix.target }}
           cache-directories: target
 
-      - uses: mozilla-actions/sccache-action@v0.0.8
+      - uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Install cross-compilation deps (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu' && runner.arch != 'ARM64'
@@ -68,6 +68,8 @@ jobs:
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
         env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
           RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C link-arg=/DEFAULTLIB:Rstrtmgr.lib' || '' }}
 
       - name: Package (Linux/macOS)
