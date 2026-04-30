@@ -34,6 +34,21 @@ Connect with any PostgreSQL client:
 psql -h 127.0.0.1 -p 5433
 ```
 
+## Docker
+
+Pre-built images are published to [GitHub Container Registry](https://github.com/Ray-D-Song/duckwire/pkgs/container/duckwire).
+
+```bash
+# In-memory
+docker run -p 5433:5433 ghcr.io/ray-d-song/duckwire:latest
+
+# Persistent database (mount a volume)
+docker run -p 5433:5433 -v ./data:/data ghcr.io/ray-d-song/duckwire:latest --db /data/mydata.db
+
+# Custom port
+docker run -p 9999:5433 ghcr.io/ray-d-song/duckwire:latest --port 9999
+```
+
 ## Configuration File
 
 DuckWire supports TOML configuration. CLI flags override config values.

@@ -34,6 +34,21 @@ duckwire --port 5439 --host 127.0.0.1
 psql -h 127.0.0.1 -p 5433
 ```
 
+## Docker
+
+预构建镜像发布在 [GitHub Container Registry](https://github.com/Ray-D-Song/duckwire/pkgs/container/duckwire)。
+
+```bash
+# 内存数据库
+docker run -p 5433:5433 ghcr.io/ray-d-song/duckwire:latest
+
+# 持久化数据库（挂载数据卷）
+docker run -p 5433:5433 -v ./data:/data ghcr.io/ray-d-song/duckwire:latest --db /data/mydata.db
+
+# 自定义端口
+docker run -p 9999:5433 ghcr.io/ray-d-song/duckwire:latest --port 9999
+```
+
 ## 配置文件
 
 DuckWire 支持 TOML 配置文件，CLI 参数优先级高于配置文件。
