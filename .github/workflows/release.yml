@@ -69,6 +69,8 @@ jobs:
 
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C link-arg=/DEFAULTLIB:Rstrtmgr.lib' || '' }}
 
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
