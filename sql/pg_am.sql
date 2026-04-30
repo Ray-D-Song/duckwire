@@ -1,0 +1,3 @@
+CREATE OR REPLACE VIEW pg_compat.pg_am AS
+SELECT 0::BIGINT AS oid, ''::VARCHAR AS amname LIMIT 0
+;

@@ -21,6 +21,9 @@ pub fn init_pg_compat(conn: &Arc<Mutex<Connection>>) {
     exec(&c, include_str!("../../sql/pg_authid.sql"));
     exec(&c, include_str!("../../sql/pg_namespace.sql"));
     exec(&c, include_str!("../../sql/pg_class.sql"));
+    exec(&c, include_str!("../../sql/pg_am.sql"));
+    exec(&c, include_str!("../../sql/pg_opclass.sql"));
+    exec(&c, include_str!("../../sql/pg_operator.sql"));
     exec(&c, include_str!("../../sql/pg_type.sql"));
     exec(&c, include_str!("../../sql/pg_attribute.sql"));
     exec(&c, include_str!("../../sql/pg_attrdef.sql"));
