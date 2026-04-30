@@ -1,6 +1,6 @@
 CREATE OR REPLACE VIEW pg_compat.pg_tables AS
 SELECT schemaname AS table_schema, tablename AS table_name, tableowner,
-       tablespace
+       NULL::VARCHAR AS tablespace
 FROM (
     SELECT
         CASE WHEN table_schema = 'main' THEN 'public' ELSE table_schema END AS schemaname,
