@@ -131,10 +131,8 @@ pub fn encode_duckdb_value(
             }
             let day = remaining + 1;
             let result = if remain_micros > 0 {
-                let frac: f64 = remain_micros as f64 / 1_000_000.0;
-                let frac_str = format!("{frac:.6}").trim_end_matches('0').trim_end_matches('.').to_string();
-                let ts_str = format!("{year:04}-{:02}-{:02} {:02}:{:02}:{:02}.{}", month + 1, day, hours, mins, secs_rem, frac_str);
-                ts_str
+                let frac_str = format!("{:06}", remain_micros).trim_end_matches('0').to_string();
+                format!("{year:04}-{:02}-{:02} {:02}:{:02}:{:02}.{frac_str}", month + 1, day, hours, mins, secs_rem)
             } else {
                 format!("{year:04}-{:02}-{:02} {:02}:{:02}:{:02}", month + 1, day, hours, mins, secs_rem)
             };
