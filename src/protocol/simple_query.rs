@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::stream;
 use pgwire::api::auth::noop::NoopStartupHandler;
 use pgwire::api::auth::StartupHandler;
-use pgwire::api::portal::Portal;
+use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
     DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldInfo, QueryResponse,
@@ -33,6 +33,14 @@ impl DuckWireHandler {
     }
 
     fn execute_query(&self, query: &str) -> PgWireResult<Vec<Response>> {
+        self.execute_query_with_format(query, None)
+    }
+
+    fn execute_query_with_format(
+        &self,
+        query: &str,
+        result_format: Option<&Format>,
+    ) -> PgWireResult<Vec<Response>> {
         let mut session = self.connection.create_session();
         let result = session.execute(query).map_err(|e| {
             error!(query = %query.trim(), error = %e, "query failed");
@@ -43,6 +51,8 @@ impl DuckWireHandler {
             DuckDBQueryResult::Rows { columns, data } => {
                 let schema = build_schema_from_columns(&columns)
                     .map_err(|e| pgwire::error::PgWireError::ApiError(Box::new(e)))?;
+
+                let schema = apply_format(schema, result_format);
 
                 let row_count = data.len();
                 let data_rows: Vec<_> = data
@@ -80,19 +90,38 @@ impl DuckWireHandler {
     }
 
     fn get_query_schema(&self, sql: &str) -> PgWireResult<Vec<FieldInfo>> {
+        self.get_query_schema_with_format(sql, None)
+    }
+
+    fn get_query_schema_with_format(
+        &self,
+        sql: &str,
+        result_format: Option<&Format>,
+    ) -> PgWireResult<Vec<FieldInfo>> {
+        let null_sql = replace_params_with_null(sql);
         let rewritten = self
             .connection
             .transpiler
-            .rewrite(sql)
-            .unwrap_or_else(|_| sql.to_string());
+            .rewrite(&null_sql)
+            .unwrap_or_else(|_| null_sql.clone());
         if rewritten.trim().is_empty() {
             return Ok(vec![]);
         }
+
         let conn = self.connection.conn.lock().map_err(|e| {
             pgwire::error::PgWireError::ApiError(Box::new(duckdb::Error::InvalidColumnName(
                 format!("{e}"),
             )))
         })?;
+
+        let upper = rewritten.trim().to_uppercase();
+        if upper.starts_with("INSERT")
+            || upper.starts_with("UPDATE")
+            || upper.starts_with("DELETE")
+        {
+            return Ok(vec![]);
+        }
+
         let mut stmt = match conn.prepare(&rewritten) {
             Ok(s) => s,
             Err(_) => return Ok(vec![]),
@@ -109,11 +138,54 @@ impl DuckWireHandler {
             .map(|i| {
                 let name = column_names[i].clone();
                 let pg_type = arrow_type_to_pg(&stmt.column_type(i)).unwrap_or(Type::UNKNOWN);
-                FieldInfo::new(name, None, None, pg_type, pgwire::api::results::FieldFormat::Text)
+                let format = result_format
+                    .map(|f| f.format_for(i))
+                    .unwrap_or(pgwire::api::results::FieldFormat::Text);
+                FieldInfo::new(name, None, None, pg_type, format)
             })
             .collect();
         Ok(fields)
     }
+}
+
+fn apply_format(
+    schema: Arc<Vec<FieldInfo>>,
+    result_format: Option<&Format>,
+) -> Arc<Vec<FieldInfo>> {
+    match result_format {
+        Some(fmt) => {
+            let fields: Vec<FieldInfo> = schema
+                .iter()
+                .enumerate()
+                .map(|(i, fi)| {
+                    let new_format = fmt.format_for(i);
+                    FieldInfo::new(
+                        fi.name().to_string(),
+                        fi.table_id(),
+                        fi.column_id(),
+                        fi.datatype().clone(),
+                        new_format,
+                    )
+                })
+                .collect();
+            Arc::new(fields)
+        }
+        None => schema,
+    }
+}
+
+fn replace_params_with_null(sql: &str) -> String {
+    let mut result = sql.to_string();
+    let mut i = 1;
+    loop {
+        let placeholder = format!("${}", i);
+        if !result.contains(&placeholder) {
+            break;
+        }
+        result = result.replacen(&placeholder, "NULL", 1);
+        i += 1;
+    }
+    result
 }
 
 #[async_trait]
@@ -158,7 +230,8 @@ impl ExtendedQueryHandler for DuckWireHandler {
         let query = substitute_params(original_sql, portal);
         debug!(substituted = %query.trim(), "execute after param substitution");
         info!(query = %query.trim(), "extended query");
-        let mut responses = self.execute_query(&query)?;
+        let mut responses =
+            self.execute_query_with_format(&query, Some(&portal.result_column_format))?;
         Ok(responses.remove(0))
     }
 
@@ -191,7 +264,8 @@ impl ExtendedQueryHandler for DuckWireHandler {
     {
         let sql = substitute_params(&target.statement.statement, target);
         debug!(sql = %sql.trim(), "describe portal");
-        let schema = match self.get_query_schema(&sql) {
+        let schema = match self.get_query_schema_with_format(&sql, Some(&target.result_column_format))
+        {
             Ok(fields) => fields,
             Err(_) => vec![],
         };

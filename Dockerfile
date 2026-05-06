@@ -3,12 +3,19 @@
 FROM rust:1-bookworm AS builder
 
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY src/ src/
-COPY sql/ sql/
-COPY build.rs ./
 
-RUN cargo build --release
+# 1. Cache dependency compilation by building a dummy project first
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs
+COPY build.rs ./
+COPY sql/ sql/
+RUN cargo build --release && rm -rf src
+
+# 2. Copy actual source code; only this layer and beyond will recompile
+COPY src/ src/
+
+# Touch files to invalidate cargo cache for the real source
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 FROM debian:bookworm-slim
 
