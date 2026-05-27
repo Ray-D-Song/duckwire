@@ -7,3 +7,4 @@ duckwire.log
 .DS_Store
 
 deploy.sh
+build.sh

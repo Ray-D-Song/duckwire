@@ -22,6 +22,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/duckwire /usr/local/bin/duckwire
+COPY --from=builder /app/target/release/deps/libduckdb.so /usr/local/lib/libduckdb.so
+RUN ldconfig
 
 EXPOSE 5433
 
