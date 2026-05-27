@@ -17,7 +17,7 @@ use tracing::{debug, error, info};
 
 use crate::backend::connection::DuckDBConnection;
 use crate::backend::result::DuckDBQueryResult;
-use crate::types::mapping::{arrow_type_to_pg, build_schema_from_columns, encode_duckdb_value};
+use crate::types::mapping::{arrow_type_to_pg, build_schema_from_columns, encode_duckdb_owned_value};
 
 pub struct DuckWireHandler {
     connection: Arc<DuckDBConnection>,
@@ -58,8 +58,7 @@ impl DuckWireHandler {
                     .map(|row_values| {
                         let mut encoder = DataRowEncoder::new(schema.clone());
                         for value in row_values {
-                            let value_ref = duckdb::types::ValueRef::from(&value);
-                            encode_duckdb_value(&mut encoder, value_ref)
+                            encode_duckdb_owned_value(&mut encoder, &value)
                                 .map_err(|e| pgwire::error::PgWireError::ApiError(Box::new(e)))?;
                         }
                         Ok(encoder.take_row())

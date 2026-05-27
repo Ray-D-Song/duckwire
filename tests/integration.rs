@@ -11,7 +11,8 @@ mod integration {
     use duckwire::backend::session::DuckDBSession;
     use duckwire::rewrite::Transpiler;
     use duckwire::types::mapping::{
-        arrow_type_to_pg, build_schema_from_columns, encode_duckdb_value,
+        arrow_type_to_pg, build_schema_from_columns, encode_duckdb_owned_value,
+        encode_duckdb_value,
     };
 
     fn make_session() -> DuckDBSession {
@@ -159,6 +160,29 @@ mod integration {
         match result {
             DuckDBQueryResult::Status(s) => assert_eq!(s, "COMMIT"),
             other => panic!("Expected Status(COMMIT), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_current_schemas_list_result_does_not_panic() {
+        let mut session = make_session();
+
+        let result = session
+            .execute("select current_database() as a, current_schemas(false) as b")
+            .unwrap();
+
+        match result {
+            DuckDBQueryResult::Rows { columns, data } => {
+                assert_eq!(columns.len(), 2);
+                assert_eq!(data.len(), 1);
+                let schema = build_schema_from_columns(&columns).unwrap();
+                let mut encoder = DataRowEncoder::new(schema);
+                for value in &data[0] {
+                    encode_duckdb_owned_value(&mut encoder, value).unwrap();
+                }
+                let _row = encoder.take_row();
+            }
+            other => panic!("Expected Rows, got {other:?}"),
         }
     }
 

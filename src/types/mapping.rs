@@ -1,4 +1,4 @@
-use duckdb::types::ValueRef;
+use duckdb::types::{Value, ValueRef};
 use pgwire::api::Type;
 use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
 use std::sync::Arc;
@@ -198,4 +198,69 @@ pub fn encode_duckdb_value(
         ValueRef::Map(_, _) => encode_text(encoder, "[map]"),
         ValueRef::Union(_, _) => encode_text(encoder, "[union]"),
     }
+}
+
+pub fn encode_duckdb_owned_value(
+    encoder: &mut DataRowEncoder,
+    value: &Value,
+) -> Result<(), DuckWireError> {
+    match value {
+        Value::List(values) | Value::Array(values) => {
+            encode_text(encoder, &format_pg_array_literal(values))
+        }
+        Value::Struct(_) | Value::Map(_) | Value::Union(_) => encode_text(encoder, &format!("{value:?}")),
+        Value::Enum(s) => encode_text(encoder, s),
+        _ => encode_duckdb_value(encoder, ValueRef::from(value)),
+    }
+}
+
+fn format_pg_array_literal(values: &[Value]) -> String {
+    let elements = values
+        .iter()
+        .map(format_pg_array_element)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{elements}}}")
+}
+
+fn format_pg_array_element(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Text(s) | Value::Enum(s) => quote_pg_array_element(s),
+        Value::Boolean(v) => {
+            if *v {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        Value::TinyInt(v) => v.to_string(),
+        Value::SmallInt(v) => v.to_string(),
+        Value::Int(v) => v.to_string(),
+        Value::BigInt(v) => v.to_string(),
+        Value::HugeInt(v) => v.to_string(),
+        Value::UTinyInt(v) => v.to_string(),
+        Value::USmallInt(v) => v.to_string(),
+        Value::UInt(v) => v.to_string(),
+        Value::UBigInt(v) => v.to_string(),
+        Value::Float(v) => v.to_string(),
+        Value::Double(v) => v.to_string(),
+        Value::Decimal(v) => v.to_string(),
+        Value::Timestamp(_, v) => quote_pg_array_element(&v.to_string()),
+        Value::Blob(v) => quote_pg_array_element(&format!("{v:?}")),
+        Value::Date32(v) => quote_pg_array_element(&v.to_string()),
+        Value::Time64(_, v) => quote_pg_array_element(&v.to_string()),
+        Value::Interval {
+            months,
+            days,
+            nanos,
+        } => quote_pg_array_element(&format!("{months} mons {days} days {nanos} ns")),
+        Value::List(values) | Value::Array(values) => quote_pg_array_element(&format_pg_array_literal(values)),
+        Value::Struct(_) | Value::Map(_) | Value::Union(_) => quote_pg_array_element(&format!("{value:?}")),
+    }
+}
+
+fn quote_pg_array_element(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }

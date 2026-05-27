@@ -6,6 +6,7 @@ WORKDIR /app
 
 # 1. Cache dependency compilation by building a dummy project first
 COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ .cargo/
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs
 COPY build.rs ./
 COPY sql/ sql/
@@ -15,7 +16,7 @@ RUN cargo build --release && rm -rf src
 COPY src/ src/
 
 # Touch files to invalidate cargo cache for the real source
-RUN touch src/main.rs src/lib.rs && cargo build --release
+RUN touch src/main.rs src/lib.rs && RUSTFLAGS="-L native=/app/target/release/deps" cargo build --release
 
 FROM debian:bookworm-slim
 
