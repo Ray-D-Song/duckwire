@@ -22,7 +22,10 @@ impl DuckDBSession {
     }
 
     pub fn execute(&mut self, sql: &str) -> Result<DuckDBQueryResult, duckdb::Error> {
-        let rewritten = self.transpiler.rewrite(sql).unwrap_or_else(|_| sql.to_string());
+        let rewritten = self
+            .transpiler
+            .rewrite(sql)
+            .unwrap_or_else(|_| sql.to_string());
 
         if rewritten.trim().is_empty() {
             debug!(original = sql, "query suppressed (empty after rewrite)");

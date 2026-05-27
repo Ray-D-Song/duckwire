@@ -11,9 +11,9 @@ use clap::Parser;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 use backend::connection::DuckDBConnection;
 use protocol::simple_query::DuckWireHandlerFactory;
@@ -33,7 +33,11 @@ struct Args {
     #[arg(short = 'H', long, help = "Listen address")]
     host: Option<String>,
 
-    #[arg(short, long, help = "Log file path (directory creates duckwire.log inside)")]
+    #[arg(
+        short,
+        long,
+        help = "Log file path (directory creates duckwire.log inside)"
+    )]
     logfile: Option<String>,
 }
 
@@ -77,8 +81,7 @@ fn merge_settings(args: Args) -> Settings {
 }
 
 fn init_logging(logfile: Option<&str>) {
-    let env_filter = EnvFilter::from_default_env()
-        .add_directive("duckwire=debug".parse().unwrap());
+    let env_filter = EnvFilter::from_default_env().add_directive("duckwire=debug".parse().unwrap());
 
     if let Some(log) = logfile {
         let path = PathBuf::from(log);
@@ -107,9 +110,7 @@ fn init_logging(logfile: Option<&str>) {
         info!("Logging to file: {}", log_path.display());
         std::mem::forget(_guard);
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 }
 
@@ -120,9 +121,8 @@ async fn main() {
 
     init_logging(settings.logfile.as_deref());
 
-    let connection = Arc::new(
-        DuckDBConnection::open(settings.db.as_deref()).expect("Failed to open DuckDB"),
-    );
+    let connection =
+        Arc::new(DuckDBConnection::open(settings.db.as_deref()).expect("Failed to open DuckDB"));
     let factory = Arc::new(DuckWireHandlerFactory::new(connection));
 
     let addr = format!("{}:{}", settings.host, settings.port);

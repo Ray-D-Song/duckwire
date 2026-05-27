@@ -1,6 +1,6 @@
 use duckdb::types::ValueRef;
-use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
 use pgwire::api::Type;
+use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
 use std::sync::Arc;
 
 use crate::errors::DuckWireError;
@@ -52,7 +52,13 @@ pub fn arrow_type_to_pg(dt: &DataType) -> Result<Type, DuckWireError> {
 
 pub fn build_field_info(name: &str, dt: &DataType) -> Result<FieldInfo, DuckWireError> {
     let pg_type = arrow_type_to_pg(dt)?;
-    Ok(FieldInfo::new(name.into(), None, None, pg_type, FieldFormat::Text))
+    Ok(FieldInfo::new(
+        name.into(),
+        None,
+        None,
+        pg_type,
+        FieldFormat::Text,
+    ))
 }
 
 pub fn build_schema_from_columns(
@@ -66,7 +72,9 @@ pub fn build_schema_from_columns(
 }
 
 fn encode_text(encoder: &mut DataRowEncoder, val: &str) -> Result<(), DuckWireError> {
-    encoder.encode_field(&val).map_err(|e| DuckWireError::Protocol(e.to_string()))
+    encoder
+        .encode_field(&val)
+        .map_err(|e| DuckWireError::Protocol(e.to_string()))
 }
 
 pub fn encode_duckdb_value(
@@ -106,24 +114,62 @@ pub fn encode_duckdb_value(
             let mut year: i32 = 1970;
             let mut remaining = days_since_epoch;
             loop {
-                let days_in_year = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 366 } else { 365 };
-                if remaining < days_in_year { break; }
+                let days_in_year = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                    366
+                } else {
+                    365
+                };
+                if remaining < days_in_year {
+                    break;
+                }
                 remaining -= days_in_year;
                 year += 1;
             }
             let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-            let month_days = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+            let month_days = [
+                31,
+                if is_leap { 29 } else { 28 },
+                31,
+                30,
+                31,
+                30,
+                31,
+                31,
+                30,
+                31,
+                30,
+                31,
+            ];
             let mut month: usize = 0;
             for (i, &md) in month_days.iter().enumerate() {
-                if remaining < md { month = i; break; }
+                if remaining < md {
+                    month = i;
+                    break;
+                }
                 remaining -= md;
             }
             let day = remaining + 1;
             let result = if remain_micros > 0 {
-                let frac_str = format!("{:06}", remain_micros).trim_end_matches('0').to_string();
-                format!("{year:04}-{:02}-{:02} {:02}:{:02}:{:02}.{frac_str}", month + 1, day, hours, mins, secs_rem)
+                let frac_str = format!("{:06}", remain_micros)
+                    .trim_end_matches('0')
+                    .to_string();
+                format!(
+                    "{year:04}-{:02}-{:02} {:02}:{:02}:{:02}.{frac_str}",
+                    month + 1,
+                    day,
+                    hours,
+                    mins,
+                    secs_rem
+                )
             } else {
-                format!("{year:04}-{:02}-{:02} {:02}:{:02}:{:02}", month + 1, day, hours, mins, secs_rem)
+                format!(
+                    "{year:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    month + 1,
+                    day,
+                    hours,
+                    mins,
+                    secs_rem
+                )
             };
             encode_text(encoder, &result)
         }
@@ -137,16 +183,16 @@ pub fn encode_duckdb_value(
         }
         ValueRef::Date32(d) => encode_text(encoder, &d.to_string()),
         ValueRef::Time64(_, t) => encode_text(encoder, &t.to_string()),
-        ValueRef::Interval { months, days, nanos } => {
-            encode_text(encoder, &format!("{months} mons {days} days {nanos} ns"))
-        }
+        ValueRef::Interval {
+            months,
+            days,
+            nanos,
+        } => encode_text(encoder, &format!("{months} mons {days} days {nanos} ns")),
         ValueRef::List(_, _) => encode_text(encoder, "[list]"),
-        ValueRef::Enum(_, _) => {
-            match value_ref.as_str() {
-                Ok(s) => encode_text(encoder, s),
-                Err(_) => encode_text(encoder, "?"),
-            }
-        }
+        ValueRef::Enum(_, _) => match value_ref.as_str() {
+            Ok(s) => encode_text(encoder, s),
+            Err(_) => encode_text(encoder, "?"),
+        },
         ValueRef::Struct(_, _) => encode_text(encoder, "[struct]"),
         ValueRef::Array(_, _) => encode_text(encoder, "[array]"),
         ValueRef::Map(_, _) => encode_text(encoder, "[map]"),

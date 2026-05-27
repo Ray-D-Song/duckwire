@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream;
-use pgwire::api::auth::noop::NoopStartupHandler;
 use pgwire::api::auth::StartupHandler;
+use pgwire::api::auth::noop::NoopStartupHandler;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
@@ -39,7 +39,7 @@ impl DuckWireHandler {
     fn execute_query_with_format(
         &self,
         query: &str,
-        result_format: Option<&Format>,
+        _result_format: Option<&Format>,
     ) -> PgWireResult<Vec<Response>> {
         let mut session = self.connection.create_session();
         let result = session.execute(query).map_err(|e| {
@@ -51,8 +51,6 @@ impl DuckWireHandler {
             DuckDBQueryResult::Rows { columns, data } => {
                 let schema = build_schema_from_columns(&columns)
                     .map_err(|e| pgwire::error::PgWireError::ApiError(Box::new(e)))?;
-
-                let schema = apply_format(schema, result_format);
 
                 let row_count = data.len();
                 let data_rows: Vec<_> = data
@@ -96,7 +94,7 @@ impl DuckWireHandler {
     fn get_query_schema_with_format(
         &self,
         sql: &str,
-        result_format: Option<&Format>,
+        _result_format: Option<&Format>,
     ) -> PgWireResult<Vec<FieldInfo>> {
         let null_sql = replace_params_with_null(sql);
         let rewritten = self
@@ -115,9 +113,7 @@ impl DuckWireHandler {
         })?;
 
         let upper = rewritten.trim().to_uppercase();
-        if upper.starts_with("INSERT")
-            || upper.starts_with("UPDATE")
-            || upper.starts_with("DELETE")
+        if upper.starts_with("INSERT") || upper.starts_with("UPDATE") || upper.starts_with("DELETE")
         {
             return Ok(vec![]);
         }
@@ -138,39 +134,19 @@ impl DuckWireHandler {
             .map(|i| {
                 let name = column_names[i].clone();
                 let pg_type = arrow_type_to_pg(&stmt.column_type(i)).unwrap_or(Type::UNKNOWN);
-                let format = result_format
-                    .map(|f| f.format_for(i))
-                    .unwrap_or(pgwire::api::results::FieldFormat::Text);
-                FieldInfo::new(name, None, None, pg_type, format)
+                // DuckWire currently encodes all values as PostgreSQL text-format
+                // payloads. Advertising binary format makes drivers decode text as
+                // PostgreSQL binary values, which breaks types such as timestamp.
+                FieldInfo::new(
+                    name,
+                    None,
+                    None,
+                    pg_type,
+                    pgwire::api::results::FieldFormat::Text,
+                )
             })
             .collect();
         Ok(fields)
-    }
-}
-
-fn apply_format(
-    schema: Arc<Vec<FieldInfo>>,
-    result_format: Option<&Format>,
-) -> Arc<Vec<FieldInfo>> {
-    match result_format {
-        Some(fmt) => {
-            let fields: Vec<FieldInfo> = schema
-                .iter()
-                .enumerate()
-                .map(|(i, fi)| {
-                    let new_format = fmt.format_for(i);
-                    FieldInfo::new(
-                        fi.name().to_string(),
-                        fi.table_id(),
-                        fi.column_id(),
-                        fi.datatype().clone(),
-                        new_format,
-                    )
-                })
-                .collect();
-            Arc::new(fields)
-        }
-        None => schema,
     }
 }
 
@@ -264,11 +240,11 @@ impl ExtendedQueryHandler for DuckWireHandler {
     {
         let sql = substitute_params(&target.statement.statement, target);
         debug!(sql = %sql.trim(), "describe portal");
-        let schema = match self.get_query_schema_with_format(&sql, Some(&target.result_column_format))
-        {
-            Ok(fields) => fields,
-            Err(_) => vec![],
-        };
+        let schema =
+            match self.get_query_schema_with_format(&sql, Some(&target.result_column_format)) {
+                Ok(fields) => fields,
+                Err(_) => vec![],
+            };
         debug!(cols = schema.len(), "describe portal response");
         Ok(DescribePortalResponse::new(schema))
     }
@@ -298,35 +274,57 @@ fn substitute_params(query: &str, portal: &Portal<String>) -> String {
 
 fn param_to_literal(portal: &Portal<String>, idx: usize, ptype: Type) -> String {
     match ptype {
-        Type::INT2 => portal.parameter::<i16>(idx, &ptype)
+        Type::INT2 => portal
+            .parameter::<i16>(idx, &ptype)
             .map(|v| v.map(|n| n.to_string()).unwrap_or_else(|| "NULL".into()))
             .unwrap_or_else(|_| "NULL".into()),
-        Type::INT4 => portal.parameter::<i32>(idx, &ptype)
+        Type::INT4 => portal
+            .parameter::<i32>(idx, &ptype)
             .map(|v| v.map(|n| n.to_string()).unwrap_or_else(|| "NULL".into()))
             .unwrap_or_else(|_| "NULL".into()),
-        Type::INT8 => portal.parameter::<i64>(idx, &ptype)
+        Type::INT8 => portal
+            .parameter::<i64>(idx, &ptype)
             .map(|v| v.map(|n| n.to_string()).unwrap_or_else(|| "NULL".into()))
             .unwrap_or_else(|_| "NULL".into()),
-        Type::FLOAT4 => portal.parameter::<f32>(idx, &ptype)
+        Type::FLOAT4 => portal
+            .parameter::<f32>(idx, &ptype)
             .map(|v| v.map(|n| n.to_string()).unwrap_or_else(|| "NULL".into()))
             .unwrap_or_else(|_| "NULL".into()),
-        Type::FLOAT8 => portal.parameter::<f64>(idx, &ptype)
+        Type::FLOAT8 => portal
+            .parameter::<f64>(idx, &ptype)
             .map(|v| v.map(|n| n.to_string()).unwrap_or_else(|| "NULL".into()))
             .unwrap_or_else(|_| "NULL".into()),
-        Type::BOOL => portal.parameter::<bool>(idx, &ptype)
-            .map(|v| v.map(|b| if b { "true".to_string() } else { "false".to_string() }).unwrap_or_else(|| "NULL".into()))
+        Type::BOOL => portal
+            .parameter::<bool>(idx, &ptype)
+            .map(|v| {
+                v.map(|b| {
+                    if b {
+                        "true".to_string()
+                    } else {
+                        "false".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "NULL".into())
+            })
             .unwrap_or_else(|_| "NULL".into()),
         // Fallback: treat unknown param types as strings, single-quoted with escaping.
         // NOTE: types like JSON/UUID may be passed as TEXT by some drivers, so we
         // escape single quotes only for known text types to avoid double-escaping.
-        _ => portal.parameter::<String>(idx, &ptype)
-            .map(|v| v.map(|s| {
-                if matches!(ptype, Type::TEXT | Type::VARCHAR | Type::NAME | Type::BPCHAR) {
-                    format!("'{}'", s.replace('\'', "''"))
-                } else {
-                    format!("'{}'", s)
-                }
-            }).unwrap_or_else(|| "NULL".into()))
+        _ => portal
+            .parameter::<String>(idx, &ptype)
+            .map(|v| {
+                v.map(|s| {
+                    if matches!(
+                        ptype,
+                        Type::TEXT | Type::VARCHAR | Type::NAME | Type::BPCHAR
+                    ) {
+                        format!("'{}'", s.replace('\'', "''"))
+                    } else {
+                        format!("'{}'", s)
+                    }
+                })
+                .unwrap_or_else(|| "NULL".into())
+            })
             .unwrap_or_else(|_| "NULL".into()),
     }
 }

@@ -3,14 +3,16 @@ mod integration {
 
     use arrow::datatypes::DataType;
     use duckdb::types::ValueRef;
-    use pgwire::api::results::DataRowEncoder;
     use pgwire::api::Type;
+    use pgwire::api::results::DataRowEncoder;
 
     use duckwire::backend::catalog::init_pg_compat;
     use duckwire::backend::result::DuckDBQueryResult;
     use duckwire::backend::session::DuckDBSession;
     use duckwire::rewrite::Transpiler;
-    use duckwire::types::mapping::{arrow_type_to_pg, build_schema_from_columns, encode_duckdb_value};
+    use duckwire::types::mapping::{
+        arrow_type_to_pg, build_schema_from_columns, encode_duckdb_value,
+    };
 
     fn make_session() -> DuckDBSession {
         let conn = Arc::new(Mutex::new(duckdb::Connection::open_in_memory().unwrap()));
@@ -36,7 +38,14 @@ mod integration {
         assert_eq!(arrow_type_to_pg(&DataType::LargeUtf8).unwrap(), Type::TEXT);
         assert_eq!(arrow_type_to_pg(&DataType::Binary).unwrap(), Type::BYTEA);
         assert_eq!(arrow_type_to_pg(&DataType::Date32).unwrap(), Type::DATE);
-        assert_eq!(arrow_type_to_pg(&DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)).unwrap(), Type::TIMESTAMP);
+        assert_eq!(
+            arrow_type_to_pg(&DataType::Timestamp(
+                arrow::datatypes::TimeUnit::Microsecond,
+                None
+            ))
+            .unwrap(),
+            Type::TIMESTAMP
+        );
         assert_eq!(arrow_type_to_pg(&DataType::Null).unwrap(), Type::UNKNOWN);
     }
 
@@ -59,10 +68,14 @@ mod integration {
         let result = t.rewrite("SHOW TRANSACTION ISOLATION LEVEL").unwrap();
         assert!(result.contains("read committed"));
 
-        let result = t.rewrite("SELECT * FROM t WHERE id = 'foo'::regclass").unwrap();
+        let result = t
+            .rewrite("SELECT * FROM t WHERE id = 'foo'::regclass")
+            .unwrap();
         assert!(!result.contains("::regclass"));
 
-        let result = t.rewrite("SELECT * FROM t WHERE id = 'bar'::regtype").unwrap();
+        let result = t
+            .rewrite("SELECT * FROM t WHERE id = 'bar'::regtype")
+            .unwrap();
         assert!(!result.contains("::regtype"));
     }
 
@@ -188,7 +201,9 @@ mod integration {
             .unwrap();
 
         session
-            .execute("INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Charlie', 35)")
+            .execute(
+                "INSERT INTO users VALUES (1, 'Alice', 30), (2, 'Bob', 25), (3, 'Charlie', 35)",
+            )
             .unwrap();
 
         let result = session
@@ -216,9 +231,7 @@ mod integration {
     #[test]
     fn test_catalog_pg_database() {
         let mut session = make_session();
-        let result = session
-            .execute("SELECT datname FROM pg_database")
-            .unwrap();
+        let result = session.execute("SELECT datname FROM pg_database").unwrap();
         match result {
             DuckDBQueryResult::Rows { data, .. } => {
                 assert!(!data.is_empty());

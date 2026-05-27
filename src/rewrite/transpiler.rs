@@ -1,4 +1,4 @@
-use polyglot_sql::{transpile, DialectType};
+use polyglot_sql::{DialectType, transpile};
 
 use crate::errors::DuckWireError;
 
@@ -121,10 +121,18 @@ impl Transpiler {
                 if let Some(pos) = upper[offset..].find(table_upper.as_str()) {
                     let abs_pos = offset + pos;
                     let before_ok = abs_pos == 0
-                        || !upper.as_bytes().get(abs_pos - 1).map(|&b| b.is_ascii_alphanumeric() || b == b'_').unwrap_or(false);
+                        || !upper
+                            .as_bytes()
+                            .get(abs_pos - 1)
+                            .map(|&b| b.is_ascii_alphanumeric() || b == b'_')
+                            .unwrap_or(false);
                     let after_end = abs_pos + table.len();
                     let after_ok = after_end >= upper.len()
-                        || !upper.as_bytes().get(after_end).map(|&b| b.is_ascii_alphanumeric() || b == b'_').unwrap_or(false);
+                        || !upper
+                            .as_bytes()
+                            .get(after_end)
+                            .map(|&b| b.is_ascii_alphanumeric() || b == b'_')
+                            .unwrap_or(false);
 
                     if before_ok && after_ok {
                         if !(abs_pos > 0 && result.as_bytes().get(abs_pos - 1) == Some(&b'.')) {
@@ -192,8 +200,14 @@ impl Transpiler {
             ("pg_stat_file", "NULL"),
             ("pg_read_file", "''"),
             ("pg_ls_dir", "NULL"),
-            ("pg_available_extensions", "(SELECT ''::VARCHAR AS name, ''::VARCHAR AS extversion, ''::VARCHAR AS extowner, false::BOOLEAN AS extrelocatable, ''::VARCHAR[] AS extconfig, ''::VARCHAR[] AS extcondition LIMIT 0)"),
-            ("pg_available_extension_versions", "(SELECT ''::VARCHAR AS name, ''::VARCHAR AS version, ''::VARCHAR AS extversion, ''::VARCHAR AS extowner, false::BOOLEAN AS extrelocatable, ''::VARCHAR[] AS extconfig, ''::VARCHAR[] AS extcondition, ''::VARCHAR AS module, ''::VARCHAR AS schema LIMIT 0)"),
+            (
+                "pg_available_extensions",
+                "(SELECT ''::VARCHAR AS name, ''::VARCHAR AS extversion, ''::VARCHAR AS extowner, false::BOOLEAN AS extrelocatable, ''::VARCHAR[] AS extconfig, ''::VARCHAR[] AS extcondition LIMIT 0)",
+            ),
+            (
+                "pg_available_extension_versions",
+                "(SELECT ''::VARCHAR AS name, ''::VARCHAR AS version, ''::VARCHAR AS extversion, ''::VARCHAR AS extowner, false::BOOLEAN AS extrelocatable, ''::VARCHAR[] AS extconfig, ''::VARCHAR[] AS extcondition, ''::VARCHAR AS module, ''::VARCHAR AS schema LIMIT 0)",
+            ),
             // NOTE: duplicate entry — this line is unreachable because the first match above always wins.
             // Kept as a safety net in case the first entry is removed or reordered.
             ("pg_available_extensions", "NULL"),
@@ -206,18 +220,32 @@ impl Transpiler {
             while offset < upper.len() {
                 if let Some(pos) = upper[offset..].find(func_upper.as_str()) {
                     let abs = offset + pos;
-                    if abs == 0 || !upper.as_bytes().get(abs - 1).map(|&b| b.is_ascii_alphanumeric() || b == b'_').unwrap_or(false) {
+                    if abs == 0
+                        || !upper
+                            .as_bytes()
+                            .get(abs - 1)
+                            .map(|&b| b.is_ascii_alphanumeric() || b == b'_')
+                            .unwrap_or(false)
+                    {
                         let after = abs + func.len();
                         if after < upper.len() && upper.as_bytes().get(after) == Some(&b'(') {
                             let close = Self::find_matching_paren(&result, after);
                             if let Some(end) = close {
                                 let prefix_len = "pg_compat.".len();
-                                let start = if abs >= prefix_len && result[abs - prefix_len..abs].eq_ignore_ascii_case("pg_compat.") {
+                                let start = if abs >= prefix_len
+                                    && result[abs - prefix_len..abs]
+                                        .eq_ignore_ascii_case("pg_compat.")
+                                {
                                     abs - prefix_len
                                 } else {
                                     abs
                                 };
-                                result = format!("{}{}{}", &result[..start], replacement, &result[end + 1..]);
+                                result = format!(
+                                    "{}{}{}",
+                                    &result[..start],
+                                    replacement,
+                                    &result[end + 1..]
+                                );
                                 // Recursive reapplication — handles multiple calls in one query
                                 return self.rewrite_pg_functions(&result);
                             }
@@ -264,11 +292,19 @@ impl Transpiler {
                 let inner = &result[abs + 2..end];
                 let rest = &result[end + 2..];
                 if let Some(cast_pos) = rest.find("::") {
-                    let type_end = rest[cast_pos + 2..].find(|c: char| !c.is_ascii_alphanumeric() && c != '[' && c != ']')
+                    let type_end = rest[cast_pos + 2..]
+                        .find(|c: char| !c.is_ascii_alphanumeric() && c != '[' && c != ']')
                         .map(|p| cast_pos + 2 + p)
                         .unwrap_or(rest.len().min(cast_pos + 10));
                     let elements: Vec<&str> = inner.split(',').collect();
-                    let array_lit = format!("[{}]", elements.iter().map(|e| format!("'{}'", e.trim())).collect::<Vec<_>>().join(", "));
+                    let array_lit = format!(
+                        "[{}]",
+                        elements
+                            .iter()
+                            .map(|e| format!("'{}'", e.trim()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
                     let skip = type_end;
                     result = format!("{}{}{}", &result[..abs], array_lit, &rest[skip..]);
                     // Recursive — may have multiple array literals in one query
@@ -322,8 +358,14 @@ impl Transpiler {
 
     fn rewrite_pg_table_functions(&self, sql: &str) -> String {
         let mut result = sql.to_string();
-        result = result.replace("pg_compat.pg_get_keywords()", "(SELECT ''::VARCHAR AS word LIMIT 0)");
-        result = result.replace("pg_catalog.pg_get_keywords()", "(SELECT ''::VARCHAR AS word LIMIT 0)");
+        result = result.replace(
+            "pg_compat.pg_get_keywords()",
+            "(SELECT ''::VARCHAR AS word LIMIT 0)",
+        );
+        result = result.replace(
+            "pg_catalog.pg_get_keywords()",
+            "(SELECT ''::VARCHAR AS word LIMIT 0)",
+        );
         result = result.replace("pg_get_keywords()", "(SELECT ''::VARCHAR AS word LIMIT 0)");
         result
     }
@@ -353,7 +395,21 @@ impl Transpiler {
         // Two-step replace avoids recursion: marker -> subquery.
         result = result.replace("information_schema.columns", "____ISC____");
         result = result.replace("INFORMATION_SCHEMA.COLUMNS", "____ISC____");
-        result = result.replace("____ISC____", "(SELECT *, data_type AS udt_name FROM information_schema.columns)");
+        result = result.replace(
+            "____ISC____",
+            "(SELECT *, data_type AS udt_name FROM information_schema.columns)",
+        );
+        result
+    }
+
+    fn rewrite_info_schema_type_aliases(&self, sql: &str) -> String {
+        let mut result = sql.to_string();
+        for type_name in [
+            "information_schema.character_data",
+            "INFORMATION_SCHEMA.CHARACTER_DATA",
+        ] {
+            result = result.replace(type_name, "VARCHAR");
+        }
         result
     }
 
@@ -368,12 +424,13 @@ impl Transpiler {
             return self.rewrite_show(sql.trim());
         }
 
-let mut result = sql.to_string();
+        let mut result = sql.to_string();
         result = result.replace("::regclass", "");
         result = result.replace("::regtype", "");
         result = result.replace("::regproc", "");
         result = result.replace("\"char\"", "VARCHAR(1)");
 
+        result = self.rewrite_info_schema_type_aliases(&result);
         result = self.rewrite_public_schema(&result);
         result = self.rewrite_pg_tables(&result);
         result = self.rewrite_pg_table_functions(&result);
@@ -463,8 +520,32 @@ mod tests {
     #[test]
     fn test_transpile_regclass_removes() {
         let t = Transpiler::new();
-        let result = t.rewrite("SELECT * FROM my_table WHERE id = 'foo'::regclass").unwrap();
+        let result = t
+            .rewrite("SELECT * FROM my_table WHERE id = 'foo'::regclass")
+            .unwrap();
         assert!(!result.contains("::regclass"));
+    }
+
+    #[test]
+    fn test_transpile_information_schema_character_data_cast() {
+        let t = Transpiler::new();
+        let result = t.rewrite("SELECT seq.seqcache::information_schema.character_data AS identity_cache FROM pg_sequence seq").unwrap();
+        assert!(
+            !result.contains("information_schema.character_data"),
+            "Result: {result}"
+        );
+        assert!(result.contains("VARCHAR"), "Result: {result}");
+    }
+
+    #[test]
+    fn test_transpile_information_schema_character_data_cast_function() {
+        let t = Transpiler::new();
+        let result = t.rewrite("SELECT CAST(seq.seqcache AS information_schema.character_data) AS identity_cache FROM pg_sequence seq").unwrap();
+        assert!(
+            !result.contains("information_schema.character_data"),
+            "Result: {result}"
+        );
+        assert!(result.contains("VARCHAR"), "Result: {result}");
     }
 
     #[test]
@@ -485,8 +566,13 @@ mod tests {
     #[test]
     fn test_transpile_quoted_pg_catalog_prefix() {
         let t = Transpiler::new();
-        let result = t.rewrite("SELECT * FROM \"pg_catalog\".\"pg_extension\"").unwrap();
-        assert!(result.contains("pg_compat.pg_extension"), "Result: {result}");
+        let result = t
+            .rewrite("SELECT * FROM \"pg_catalog\".\"pg_extension\"")
+            .unwrap();
+        assert!(
+            result.contains("pg_compat.pg_extension"),
+            "Result: {result}"
+        );
         assert!(!result.contains("\"pg_catalog\""));
         assert!(!result.contains("\"pg_extension\""));
     }
@@ -503,7 +589,10 @@ mod tests {
         let t = Transpiler::new();
         let result = t.rewrite("SELECT d.datname, t.spcname FROM pg_database AS d LEFT JOIN pg_tablespace AS t ON d.dattablespace = t.oid").unwrap();
         assert!(result.contains("pg_compat.pg_database"), "Result: {result}");
-        assert!(result.contains("pg_compat.pg_tablespace"), "Result: {result}");
+        assert!(
+            result.contains("pg_compat.pg_tablespace"),
+            "Result: {result}"
+        );
     }
 
     #[test]
@@ -516,7 +605,9 @@ mod tests {
     #[test]
     fn test_transpile_pg_function_replacement() {
         let t = Transpiler::new();
-        let result = t.rewrite("SELECT pg_get_userbyid(d.datdba) AS databaseowner FROM pg_database d").unwrap();
+        let result = t
+            .rewrite("SELECT pg_get_userbyid(d.datdba) AS databaseowner FROM pg_database d")
+            .unwrap();
         assert!(!result.contains("pg_get_userbyid"), "Result: {result}");
         assert!(result.contains("pg_compat.pg_database"), "Result: {result}");
     }
@@ -524,21 +615,29 @@ mod tests {
     #[test]
     fn test_transpile_pg_encoding_to_char() {
         let t = Transpiler::new();
-        let result = t.rewrite("SELECT pg_encoding_to_char(d.encoding) AS encodingname FROM pg_database d").unwrap();
+        let result = t
+            .rewrite("SELECT pg_encoding_to_char(d.encoding) AS encodingname FROM pg_database d")
+            .unwrap();
         assert!(!result.contains("pg_encoding_to_char"), "Result: {result}");
     }
 
     #[test]
     fn test_transpile_shobj_description() {
         let t = Transpiler::new();
-        let result = t.rewrite("SELECT shobj_description(d.oid, 'pg_database') AS description FROM pg_database d").unwrap();
+        let result = t
+            .rewrite(
+                "SELECT shobj_description(d.oid, 'pg_database') AS description FROM pg_database d",
+            )
+            .unwrap();
         assert!(result.contains("pg_compat.pg_database"), "Result: {result}");
     }
 
     #[test]
     fn test_transpile_pg_array_literal() {
         let t = Transpiler::new();
-        let result = t.rewrite("SELECT * FROM pg_class WHERE relkind = ANY('{r,v,m}'::char[])").unwrap();
+        let result = t
+            .rewrite("SELECT * FROM pg_class WHERE relkind = ANY('{r,v,m}'::char[])")
+            .unwrap();
         assert!(!result.contains("'{r,v,m}'"), "Result: {result}");
         assert!(result.contains("['r'"), "Result: {result}");
     }
@@ -546,8 +645,13 @@ mod tests {
     #[test]
     fn test_transpile_pg_available_extension_versions() {
         let t = Transpiler::new();
-        let result = t.rewrite("SELECT * FROM pg_available_extension_versions()").unwrap();
-        assert!(!result.contains("pg_available_extension_versions"), "Result: {result}");
+        let result = t
+            .rewrite("SELECT * FROM pg_available_extension_versions()")
+            .unwrap();
+        assert!(
+            !result.contains("pg_available_extension_versions"),
+            "Result: {result}"
+        );
     }
 
     #[test]
