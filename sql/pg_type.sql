@@ -1,7 +1,8 @@
 -- Hardcoded Postgres type catalog entries (OID, typelen, typbyval, typalign, etc.)
 -- required by JDBC/ODBC drivers and ORMs for schema introspection.
 CREATE OR REPLACE VIEW pg_compat.pg_type AS
-SELECT oid, typname, typnamespace, typtype, typelem, typrelid, typlen, typbyval,
+SELECT oid, 1::BIGINT AS xmin, typname, typnamespace, 10::BIGINT AS typowner,
+       typtype, typelem, typrelid, typlen, typbyval,
        typacl, typinput, typoutput, typreceive, typsend, typmodin, typmodout,
        typalign, typstorage, typdefault, typdefaultbin, typcategory, typispreferred,
        typisdefined, typdelim, typnotnull, typbasetype, typtypmod, typndims, typcollation

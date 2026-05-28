@@ -1,9 +1,10 @@
 -- OIDs are derived from row_number() to join with pg_attribute.
 -- Both must use the same ORDER BY to keep OID assignments consistent.
 CREATE OR REPLACE VIEW pg_compat.pg_class AS
-SELECT oid, relname, relnamespace, relkind, relowner, reltablespace,
+SELECT oid, 1::BIGINT AS xmin, relname, relnamespace, relkind, relowner, reltablespace,
        relpages, reltuples, relacl, reloptions, relhasindex, relhasrules,
-       relhastriggers, relpersistence, relispartition, relpartbound, reltype
+       relhastriggers, relpersistence, relispartition, relpartbound, reltype,
+       0::BIGINT AS relam, 0::BIGINT AS relfilenode
 FROM (
     SELECT
         row_number() OVER (ORDER BY table_schema, table_name)::BIGINT + 16383 AS oid,

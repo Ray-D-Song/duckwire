@@ -1,5 +1,5 @@
 CREATE OR REPLACE VIEW pg_compat.pg_namespace AS
-SELECT oid, nspname, nspowner::BIGINT AS nspowner, NULL::VARCHAR[] AS nspacl
+SELECT oid, 1::BIGINT AS xmin, nspname, nspowner::BIGINT AS nspowner, NULL::VARCHAR[] AS nspacl
 FROM (
     SELECT 11::BIGINT AS oid, 'pg_catalog'::VARCHAR AS nspname, 10::BIGINT AS nspowner
     UNION ALL SELECT 9975::BIGINT, 'information_schema', 10::BIGINT

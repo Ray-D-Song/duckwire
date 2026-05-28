@@ -1,7 +1,7 @@
 CREATE OR REPLACE VIEW pg_compat.routines AS
 SELECT ''::VARCHAR AS specific_catalog, ''::VARCHAR AS specific_schema, ''::VARCHAR AS specific_name,
        ''::VARCHAR AS routine_catalog, ''::VARCHAR AS routine_schema, ''::VARCHAR AS routine_name,
-       ''::VARCHAR AS routine_type, NULL::VARCHAR AS module_catalog, NULL::VARCHAR AS module_schema,
+       'FUNCTION'::VARCHAR AS routine_type, NULL::VARCHAR AS module_catalog, NULL::VARCHAR AS module_schema,
        NULL::VARCHAR AS module_name, NULL::VARCHAR AS dtd_identifier, 'SQL'::VARCHAR AS routine_body,
        NULL::VARCHAR AS routine_definition, NULL::VARCHAR AS external_name,
        'SQL'::VARCHAR AS external_language, 'GENERAL'::VARCHAR AS parameter_style,

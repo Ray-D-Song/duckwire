@@ -57,6 +57,7 @@ pub fn init_pg_compat(conn: &Arc<Mutex<Connection>>) {
     exec(&c, include_str!("../../sql/pg_policies.sql"));
     exec(&c, include_str!("../../sql/pg_routines.sql"));
     exec(&c, include_str!("../../sql/pg_parameters.sql"));
+    exec(&c, include_str!("../../sql/pg_deep_introspection.sql"));
 
     drop(c);
     info!("pg_compat compatibility views initialized");

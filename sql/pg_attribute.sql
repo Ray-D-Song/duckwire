@@ -1,6 +1,7 @@
 CREATE OR REPLACE VIEW pg_compat.pg_attribute AS
-SELECT attrelid, attname, atttypid, attlen, attnum, attndims, atttypmod,
-       attnotnull, attisdropped, attacl, attcollation
+SELECT attrelid, 1::BIGINT AS xmin, attname, atttypid, attlen, attnum, attndims, atttypmod,
+       attnotnull, attisdropped, attacl, attcollation, attislocal, attfdwoptions,
+       attidentity, attgenerated
 FROM (
     SELECT
         t.oid AS attrelid,
@@ -43,7 +44,11 @@ FROM (
         CASE WHEN c.is_nullable = 'YES' THEN false ELSE true END AS attnotnull,
         false::BOOLEAN AS attisdropped,
         NULL::VARCHAR[] AS attacl,
-        0::BIGINT AS attcollation
+        0::BIGINT AS attcollation,
+        true::BOOLEAN AS attislocal,
+        NULL::VARCHAR[] AS attfdwoptions,
+        ''::VARCHAR AS attidentity,
+        ''::VARCHAR AS attgenerated
     FROM information_schema.columns c
     JOIN (
         SELECT

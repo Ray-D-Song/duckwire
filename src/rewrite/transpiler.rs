@@ -11,6 +11,9 @@ const PG_COMPAT_TABLES: &[&str] = &[
     "pg_authid",
     "pg_namespace",
     "pg_class",
+    "pg_am",
+    "pg_opclass",
+    "pg_operator",
     "pg_attribute",
     "pg_type",
     "pg_description",
@@ -34,12 +37,24 @@ const PG_COMPAT_TABLES: &[&str] = &[
     "pg_policies",
     "pg_foreign_table",
     "pg_foreign_server",
+    "pg_foreign_data_wrapper",
+    "pg_user_mappings",
     "pg_collation",
     "pg_shdescription",
     "pg_stat_user_tables",
     "pg_enum",
     "pg_conversion",
     "pg_attrdef",
+    "pg_event_trigger",
+    "pg_cast",
+    "pg_sequence",
+    "pg_aggregate",
+    "pg_opfamily",
+    "pg_amop",
+    "pg_amproc",
+    "pg_rewrite",
+    "pg_policy",
+    "pg_trigger",
 ];
 
 pub struct Transpiler;
@@ -58,9 +73,19 @@ impl Transpiler {
             return Ok(String::new());
         }
         match transpile(&rewritten, DialectType::PostgreSQL, DialectType::DuckDB) {
-            Ok(results) => Ok(results.join("; ")),
+            Ok(results) => Ok(self.rewrite_duckdb_post_transpile(&results.join("; "))),
             Err(_) => Ok(rewritten),
         }
+    }
+
+    fn rewrite_duckdb_post_transpile(&self, sql: &str) -> String {
+        let result = self.rewrite_pg_functions(sql);
+        let result = self.rewrite_bracketed_select_arrays(&result);
+        let result = self.rewrite_unnest_column_aliases(&result);
+        let result = self.rewrite_pg_pseudo_type_casts(&result);
+        let result = self.rewrite_datagrip_extension_version_arrays(&result);
+        let result = self.rewrite_public_schema(&result);
+        self.rewrite_ctid_projection(&result)
     }
 
     fn rewrite_show(&self, sql: &str) -> String {
@@ -164,6 +189,9 @@ impl Transpiler {
         let mut result = self.rewrite_pg_builtin_prefixes(sql);
 
         let pg_funcs = [
+            ("current_database", "'postgres'"),
+            ("current_schema", "'public'"),
+            ("current_schemas", "['public']"),
             ("pg_get_userbyid", "'postgres'"),
             ("pg_encoding_to_char", "'UTF8'"),
             ("pg_get_expr", "NULL"),
@@ -183,6 +211,9 @@ impl Transpiler {
             ("pg_get_functiondef", "NULL"),
             ("pg_get_partkeydef", "NULL"),
             ("pg_get_function_result", "NULL"),
+            ("pg_get_function_arguments", "''"),
+            ("pg_get_function_sqlbody", "NULL"),
+            ("quote_ident", "''"),
             ("pg_relation_filenode", "0"),
             ("pg_relation_size", "0"),
             ("pg_database_size", "0"),
@@ -203,6 +234,7 @@ impl Transpiler {
             ("pg_try_advisory_lock", "true"),
             ("pg_is_in_recovery", "false"),
             ("txid_current", "1"),
+            ("age", "0::BIGINT"),
             ("pg_last_xlog_receive_location", "'0/0'"),
             ("pg_last_xlog_replay_location", "'0/0'"),
             ("pg_xlog_name", "'0/0'"),
@@ -228,6 +260,14 @@ impl Transpiler {
                 &format!("pg_compat.\"{}\"(", func),
                 &format!("pg_compat.{}(", func),
             );
+            result = result.replace(
+                &format!("\"pg_compat\".\"{}\"(", func),
+                &format!("\"pg_compat\".{}(", func),
+            );
+            result = result.replace(
+                &format!("\"pg_compat\".{}(", func),
+                &format!("pg_compat.{}(", func),
+            );
             result = result.replace(&format!("\"{}\"(", func), &format!("{}(", func));
         }
 
@@ -238,26 +278,20 @@ impl Transpiler {
             while offset < upper.len() {
                 if let Some(pos) = upper[offset..].find(func_upper.as_str()) {
                     let abs = offset + pos;
-                    if abs == 0
-                        || !upper
+                    if let Some(start) = Self::pg_function_call_start(&result, abs) {
+                        let mut open = abs + func.len();
+                        while result
                             .as_bytes()
-                            .get(abs - 1)
-                            .map(|&b| b.is_ascii_alphanumeric() || b == b'_')
+                            .get(open)
+                            .map(|b| b.is_ascii_whitespace())
                             .unwrap_or(false)
-                    {
-                        let after = abs + func.len();
-                        if after < upper.len() && upper.as_bytes().get(after) == Some(&b'(') {
-                            let close = Self::find_matching_paren(&result, after);
+                        {
+                            open += 1;
+                        }
+
+                        if open < result.len() && result.as_bytes().get(open) == Some(&b'(') {
+                            let close = Self::find_matching_paren(&result, open);
                             if let Some(end) = close {
-                                let prefix_len = "pg_compat.".len();
-                                let start = if abs >= prefix_len
-                                    && result[abs - prefix_len..abs]
-                                        .eq_ignore_ascii_case("pg_compat.")
-                                {
-                                    abs - prefix_len
-                                } else {
-                                    abs
-                                };
                                 result = format!(
                                     "{}{}{}",
                                     &result[..start],
@@ -276,17 +310,153 @@ impl Transpiler {
             }
         }
 
+        Self::rewrite_unknown_pg_schema_functions(&result)
+    }
+
+    fn rewrite_unknown_pg_schema_functions(sql: &str) -> String {
+        let mut result = sql.to_string();
+
+        loop {
+            let Some((start, open, replacement)) = Self::find_unknown_pg_schema_function(&result)
+            else {
+                break;
+            };
+            let Some(end) = Self::find_matching_paren(&result, open) else {
+                break;
+            };
+            result = format!("{}{}{}", &result[..start], replacement, &result[end + 1..]);
+        }
+
         result
+    }
+
+    fn find_unknown_pg_schema_function(sql: &str) -> Option<(usize, usize, &'static str)> {
+        let upper = sql.to_uppercase();
+
+        let mut best: Option<(usize, usize, &'static str)> = None;
+        for schema in ["PG_COMPAT", "\"PG_COMPAT\"", "PG_CATALOG", "\"PG_CATALOG\""] {
+            let mut offset = 0;
+            while let Some(pos) = upper[offset..].find(schema) {
+                let start = offset + pos;
+                let mut i = start + schema.len();
+                while sql
+                    .as_bytes()
+                    .get(i)
+                    .map(|b| b.is_ascii_whitespace())
+                    .unwrap_or(false)
+                {
+                    i += 1;
+                }
+                if sql.as_bytes().get(i) != Some(&b'.') {
+                    offset = start + schema.len();
+                    continue;
+                }
+                i += 1;
+                while sql
+                    .as_bytes()
+                    .get(i)
+                    .map(|b| b.is_ascii_whitespace())
+                    .unwrap_or(false)
+                {
+                    i += 1;
+                }
+
+                let (func_name, mut after_name) = if sql.as_bytes().get(i) == Some(&b'"') {
+                    let name_start = i + 1;
+                    let Some(end_rel) = sql[name_start..].find('"') else {
+                        offset = start + schema.len();
+                        continue;
+                    };
+                    let name_end = name_start + end_rel;
+                    (&sql[name_start..name_end], name_end + 1)
+                } else {
+                    let name_start = i;
+                    while sql
+                        .as_bytes()
+                        .get(i)
+                        .map(|&b| b.is_ascii_alphanumeric() || b == b'_')
+                        .unwrap_or(false)
+                    {
+                        i += 1;
+                    }
+                    if i == name_start {
+                        offset = start + schema.len();
+                        continue;
+                    }
+                    (&sql[name_start..i], i)
+                };
+
+                while sql
+                    .as_bytes()
+                    .get(after_name)
+                    .map(|b| b.is_ascii_whitespace())
+                    .unwrap_or(false)
+                {
+                    after_name += 1;
+                }
+
+                if sql.as_bytes().get(after_name) == Some(&b'(') {
+                    let replacement = if func_name.eq_ignore_ascii_case("age") {
+                        "0::BIGINT"
+                    } else {
+                        "NULL"
+                    };
+                    match best {
+                        Some((best_start, _, _)) if best_start < start => {}
+                        _ => best = Some((start, after_name, replacement)),
+                    }
+                }
+
+                offset = start + schema.len();
+            }
+        }
+
+        best
+    }
+
+    fn pg_function_call_start(sql: &str, func_start: usize) -> Option<usize> {
+        let bytes = sql.as_bytes();
+        if func_start > bytes.len() {
+            return None;
+        }
+
+        let mut i = func_start;
+        while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+
+        if i > 0 && bytes[i - 1] == b'.' {
+            let mut schema_end = i - 1;
+            while schema_end > 0 && bytes[schema_end - 1].is_ascii_whitespace() {
+                schema_end -= 1;
+            }
+
+            for schema in ["pg_compat", "\"pg_compat\"", "pg_catalog", "\"pg_catalog\""] {
+                if schema_end >= schema.len()
+                    && sql[schema_end - schema.len()..schema_end].eq_ignore_ascii_case(schema)
+                {
+                    return Some(schema_end - schema.len());
+                }
+            }
+
+            return None;
+        }
+
+        if func_start == 0
+            || !bytes
+                .get(func_start - 1)
+                .map(|&b| b.is_ascii_alphanumeric() || b == b'_')
+                .unwrap_or(false)
+        {
+            Some(func_start)
+        } else {
+            None
+        }
     }
 
     fn rewrite_pg_builtin_prefixes(&self, sql: &str) -> String {
         let mut result = sql.to_string();
-        for func in [
-            "current_database",
-            "current_schema",
-            "current_schemas",
-            "current_user",
-        ] {
+        for func in ["current_user"] {
             result = result.replace(&format!("pg_compat.\"{}\"(", func), &format!("{}(", func));
             result = result.replace(&format!("pg_compat.{}(", func), &format!("{}(", func));
             result = result.replace(&format!("\"{}\"(", func), &format!("{}(", func));
@@ -352,6 +522,114 @@ impl Transpiler {
         result
     }
 
+    fn rewrite_bracketed_select_arrays(&self, sql: &str) -> String {
+        let mut result = sql.to_string();
+
+        while let Some(start) = result.to_uppercase().find("[SELECT ") {
+            let bytes = result.as_bytes();
+            let mut i = start + 1;
+            let mut depth = 0i32;
+            let mut in_string = false;
+            let mut end = None;
+
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\'' if i == 0 || bytes[i - 1] != b'\\' => in_string = !in_string,
+                    b'(' if !in_string => depth += 1,
+                    b')' if !in_string => depth -= 1,
+                    b']' if !in_string && depth == 0 => {
+                        end = Some(i);
+                        break;
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+
+            if let Some(end) = end {
+                result = format!(
+                    "{}ARRAY({}){}",
+                    &result[..start],
+                    &result[start + 1..end],
+                    &result[end + 1..]
+                );
+            } else {
+                break;
+            }
+        }
+
+        result
+    }
+
+    fn rewrite_unnest_column_aliases(&self, sql: &str) -> String {
+        let mut result = sql.to_string();
+
+        loop {
+            let upper = result.to_uppercase();
+            let Some(unnest_pos) = upper.find("UNNEST(") else {
+                break;
+            };
+            let open = unnest_pos + "UNNEST".len();
+            let Some(close) = Self::find_matching_paren(&result, open) else {
+                break;
+            };
+
+            let after = &result[close + 1..];
+            let after_trimmed = after.trim_start();
+            let skipped_ws = after.len() - after_trimmed.len();
+            let Some(alias_rest) = after_trimmed
+                .strip_prefix("AS k")
+                .or_else(|| after_trimmed.strip_prefix("as k"))
+            else {
+                break;
+            };
+
+            if alias_rest
+                .as_bytes()
+                .first()
+                .map(|&b| b == b'(' || b.is_ascii_alphanumeric() || b == b'_')
+                .unwrap_or(false)
+            {
+                break;
+            }
+
+            let insert_at = close + 1 + skipped_ws + "AS k".len();
+            result.insert_str(insert_at, "(k)");
+        }
+
+        result
+    }
+
+    fn rewrite_pg_pseudo_type_casts(&self, sql: &str) -> String {
+        let mut result = sql.to_string();
+        for pseudo_type in [
+            "REGOPER",
+            "REGOPERATOR",
+            "REGCLASS",
+            "REGTYPE",
+            "REGPROC",
+            "NAME",
+        ] {
+            result = result.replace(&format!(" AS {pseudo_type})"), " AS TEXT)");
+            result = result.replace(&format!(" AS pg_catalog.{pseudo_type})"), " AS TEXT)");
+            result = result.replace(&format!(" AS pg_compat.{pseudo_type})"), " AS TEXT)");
+        }
+        result
+    }
+
+    fn rewrite_datagrip_extension_version_arrays(&self, sql: &str) -> String {
+        let upper = sql.to_uppercase();
+        if !(upper.contains("PG_COMPAT.PG_EXTENSION AS E")
+            || upper.contains("PG_COMPAT.PG_EXTENSION E"))
+        {
+            return sql.to_string();
+        }
+
+        sql.replace("UNNEST(available_versions)", "UNNEST(E.available_versions)")
+            .replace(" unnest > extversion", " unnest > E.extversion")
+            .replace(" unnest <> extversion", " unnest <> E.extversion")
+    }
+
     // Strips ORDER BY clauses inside STRING_AGG() because DuckDB does not support
     // order-sensitive aggregate syntax. Deletions are applied in reverse to preserve
     // byte positions.
@@ -391,6 +669,11 @@ impl Transpiler {
 
     fn rewrite_pg_table_functions(&self, sql: &str) -> String {
         let mut result = sql.to_string();
+        result = Self::rewrite_pg_schema_table_function(
+            &result,
+            "pg_indexam_has_property",
+            "(SELECT false AS pg_indexam_has_property)",
+        );
         result = result.replace(
             "pg_compat.pg_get_keywords()",
             "(SELECT ''::VARCHAR AS word LIMIT 0)",
@@ -403,15 +686,64 @@ impl Transpiler {
         result
     }
 
+    fn rewrite_pg_schema_table_function(sql: &str, func: &str, replacement: &str) -> String {
+        let mut result = sql.to_string();
+
+        loop {
+            let upper = result.to_uppercase();
+            let func_upper = func.to_uppercase();
+            let Some(pos) = upper.find(&func_upper) else {
+                break;
+            };
+            let Some(start) = Self::pg_function_call_start(&result, pos) else {
+                break;
+            };
+            let mut open = pos + func.len();
+            while result
+                .as_bytes()
+                .get(open)
+                .map(|b| b.is_ascii_whitespace())
+                .unwrap_or(false)
+            {
+                open += 1;
+            }
+            if result.as_bytes().get(open) != Some(&b'(') {
+                break;
+            }
+            let Some(end) = Self::find_matching_paren(&result, open) else {
+                break;
+            };
+            result = format!("{}{}{}", &result[..start], replacement, &result[end + 1..]);
+        }
+
+        result
+    }
+
     fn rewrite_public_schema(&self, sql: &str) -> String {
         let mut result = sql.to_string();
         result = result.replace("\"public\".", "\"main\".");
+        result = result.replace("public.", "main.");
+        result = result.replace("PUBLIC.", "main.");
         result = result.replace(" FROM public.", " FROM main.");
         result = result.replace(" from public.", " from main.");
         result = result.replace(" JOIN public.", " JOIN main.");
         result = result.replace(" join public.", " join main.");
         result = result.replace("UPDATE public.", "UPDATE main.");
         result = result.replace("INSERT INTO public.", "INSERT INTO main.");
+        result
+    }
+
+    fn rewrite_ctid_projection(&self, sql: &str) -> String {
+        let mut result = sql.to_string();
+        for ctid in ["CTID", "ctid"] {
+            result = result.replace(&format!(", {ctid} FROM "), ", 0::BIGINT AS CTID FROM ");
+            result = result.replace(
+                &format!("SELECT {ctid} FROM "),
+                "SELECT 0::BIGINT AS CTID FROM ",
+            );
+            result = result.replace(&format!(", {ctid},"), ", 0::BIGINT AS CTID,");
+            result = result.replace(&format!("SELECT {ctid},"), "SELECT 0::BIGINT AS CTID,");
+        }
         result
     }
 
@@ -458,19 +790,52 @@ impl Transpiler {
         }
 
         let mut result = sql.to_string();
+        result = result.replace("::regoperator", "::TEXT");
+        result = result.replace("::REGOPERATOR", "::TEXT");
+        result = result.replace(" AS NAME)", " AS TEXT)");
+        result = result.replace(" AS pg_catalog.NAME)", " AS TEXT)");
+        result = result.replace(" AS pg_compat.NAME)", " AS TEXT)");
         result = result.replace("::regclass", "");
         result = result.replace("::regtype", "");
         result = result.replace("::regproc", "");
+        result = result.replace("::regoper", "::TEXT");
+        result = result.replace("::REGOPER", "::TEXT");
         result = result.replace("\"char\"", "VARCHAR(1)");
 
         result = self.rewrite_info_schema_type_aliases(&result);
         result = self.rewrite_public_schema(&result);
+        result = self.rewrite_ctid_projection(&result);
         result = self.rewrite_pg_tables(&result);
         result = self.rewrite_pg_table_functions(&result);
         result = self.rewrite_pg_functions(&result);
         result = self.rewrite_pg_array_literals(&result);
+        result = self.rewrite_any_array_comparisons(&result);
         result = self.rewrite_string_agg_order_by(&result);
         result = self.rewrite_info_schema(&result);
+
+        result
+    }
+
+    fn rewrite_any_array_comparisons(&self, sql: &str) -> String {
+        let mut result = sql.to_string();
+
+        loop {
+            let upper = result.to_uppercase();
+            let Some(any_pos) = upper.find("ANY(") else {
+                break;
+            };
+            let open = any_pos + "ANY".len();
+            let Some(close) = Self::find_matching_paren(&result, open) else {
+                break;
+            };
+            let inner = &result[open + 1..close];
+            result = format!(
+                "{}list_extract({}, 1){}",
+                &result[..any_pos],
+                inner,
+                &result[close + 1..]
+            );
+        }
 
         result
     }
@@ -737,6 +1102,46 @@ mod tests {
         assert!(result.contains("pg_compat.pg_database"), "Result: {result}");
         assert!(
             result.contains("pg_compat.pg_shdescription"),
+            "Result: {result}"
+        );
+    }
+
+    #[test]
+    fn test_transpile_current_schema_public_view() {
+        let t = Transpiler::new();
+        let result = t
+            .rewrite(
+                "select current_database() as db, current_schema() as s, current_schemas(false) as schemas",
+            )
+            .unwrap();
+        assert!(!result.contains("current_database"), "Result: {result}");
+        assert!(!result.contains("current_schema"), "Result: {result}");
+        assert!(!result.contains("current_schemas"), "Result: {result}");
+        assert!(result.contains("'postgres'"), "Result: {result}");
+        assert!(result.contains("'public'"), "Result: {result}");
+    }
+
+    #[test]
+    fn test_transpile_array_select_postprocess() {
+        let t = Transpiler::new();
+        let result = t
+            .rewrite(
+                "SELECT ARRAY(SELECT unnest FROM UNNEST(available_versions) WHERE unnest <> extversion) AS other_versions FROM pg_extension",
+            )
+            .unwrap();
+        assert!(!result.contains("[SELECT"), "Result: {result}");
+        assert!(result.contains("ARRAY(SELECT"), "Result: {result}");
+    }
+
+    #[test]
+    fn test_transpile_any_array_comparison() {
+        let t = Transpiler::new();
+        let result = t
+            .rewrite("SELECT * FROM pg_index i LEFT JOIN pg_opclass o ON o.oid = ANY(i.indclass)")
+            .unwrap();
+        assert!(!result.contains("ANY("), "Result: {result}");
+        assert!(
+            result.to_uppercase().contains("LIST_EXTRACT"),
             "Result: {result}"
         );
     }
