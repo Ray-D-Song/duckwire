@@ -344,6 +344,26 @@ mod integration {
     }
 
     #[test]
+    fn test_catalog_pg_locks_datagrip_transactionid_query() {
+        let mut session = make_session();
+        let result = session
+            .execute(
+                "SELECT CAST(L.transactionid AS BIGINT) AS transaction_id \
+                 FROM pg_compat.pg_locks AS L \
+                 WHERE L.transactionid IS NOT NULL \
+                 ORDER BY pg_compat.age(L.transactionid)",
+            )
+            .unwrap();
+        match result {
+            DuckDBQueryResult::Rows { columns, data } => {
+                assert_eq!(columns.len(), 1);
+                assert_eq!(data.len(), 0);
+            }
+            other => panic!("Expected Rows, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_catalog_pg_roles() {
         let mut session = make_session();
         let result = session.execute("SELECT rolname FROM pg_roles").unwrap();
