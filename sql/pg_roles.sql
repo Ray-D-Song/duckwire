@@ -8,8 +8,10 @@ SELECT
     true::BOOLEAN AS rolcanlogin,
     true::BOOLEAN AS rolinherit,
     false::BOOLEAN AS rolreplication,
+    -1::INTEGER AS rolconnlimit,
+    NULL::TIMESTAMP AS rolvaliduntil,
+    false::BOOLEAN AS rolbypassrls,
     NULL::VARCHAR AS rolpassword,
     NULL::VARCHAR AS rolcomments,
-    false::BOOLEAN AS rolbypassrls,
     NULL::VARCHAR[] AS rolconfig
 ;

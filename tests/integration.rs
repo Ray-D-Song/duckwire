@@ -330,6 +330,72 @@ mod integration {
     }
 
     #[test]
+    fn test_catalog_pg_database_datagrip_privilege_query() {
+        let mut session = make_session();
+        let result = session
+            .execute(
+                "SELECT d.datname, d.datcollate, d.datconnlimit, d.description, \
+                 pg_catalog.has_database_privilege(d.datname, 'CONNECT') AS can_connect \
+                 FROM pg_database d",
+            )
+            .unwrap();
+        match result {
+            DuckDBQueryResult::Rows { columns, data } => {
+                assert_eq!(columns.len(), 5);
+                assert!(!data.is_empty());
+            }
+            other => panic!("Expected Rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_catalog_datagrip_txid_query() {
+        let mut session = make_session();
+        let result = session
+            .execute(
+                "select case
+                   when pg_catalog.pg_is_in_recovery()
+                     then null
+                   else
+                     (pg_catalog.txid_current() % 4294967296)::varchar::bigint
+                 end as current_txid",
+            )
+            .unwrap();
+        match result {
+            DuckDBQueryResult::Rows { columns, data } => {
+                assert_eq!(columns.len(), 1);
+                assert_eq!(data.len(), 1);
+            }
+            other => panic!("Expected Rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_catalog_datagrip_database_order_query() {
+        let mut session = make_session();
+        let result = session
+            .execute(
+                "select N.oid::bigint as id,
+                        datname as name,
+                        D.description,
+                        datistemplate as is_template,
+                        datallowconn as allow_connections,
+                        pg_catalog.pg_get_userbyid(N.datdba) as \"owner\"
+                 from pg_catalog.pg_database N
+                   left join pg_catalog.pg_shdescription D on N.oid = D.objoid
+                 order by case when datname = pg_catalog.current_database() then -1::bigint else N.oid::bigint end",
+            )
+            .unwrap();
+        match result {
+            DuckDBQueryResult::Rows { columns, data } => {
+                assert_eq!(columns.len(), 6);
+                assert!(!data.is_empty());
+            }
+            other => panic!("Expected Rows, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_catalog_pg_settings() {
         let mut session = make_session();
         let result = session
@@ -369,6 +435,73 @@ mod integration {
         let result = session.execute("SELECT rolname FROM pg_roles").unwrap();
         match result {
             DuckDBQueryResult::Rows { data, .. } => {
+                assert!(!data.is_empty());
+            }
+            other => panic!("Expected Rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_catalog_datagrip_timezone_query() {
+        let mut session = make_session();
+        let result = session
+            .execute(
+                "select name, is_dst from pg_catalog.pg_timezone_names
+                 union distinct
+                 select abbrev as name, is_dst from pg_catalog.pg_timezone_abbrevs",
+            )
+            .unwrap();
+        match result {
+            DuckDBQueryResult::Rows { columns, data } => {
+                assert_eq!(columns.len(), 2);
+                assert!(!data.is_empty());
+            }
+            other => panic!("Expected Rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_catalog_datagrip_roles_query() {
+        let mut session = make_session();
+        let result = session
+            .execute(
+                "select R.oid::bigint as role_id, rolname as role_name,
+                   rolsuper is_super, rolinherit is_inherit,
+                   rolcreaterole can_createrole, rolcreatedb can_createdb,
+                   rolcanlogin can_login, rolreplication /* false */ is_replication,
+                   rolconnlimit conn_limit, rolvaliduntil valid_until,
+                   rolbypassrls /* false */ bypass_rls, rolconfig config,
+                   D.description
+                 from pg_catalog.pg_roles R
+                   left join pg_catalog.pg_shdescription D on D.objoid = R.oid",
+            )
+            .unwrap();
+        match result {
+            DuckDBQueryResult::Rows { columns, data } => {
+                assert_eq!(columns.len(), 13);
+                assert!(!data.is_empty());
+            }
+            other => panic!("Expected Rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_catalog_datagrip_tablespace_query() {
+        let mut session = make_session();
+        let result = session
+            .execute(
+                "select T.oid::bigint as id, T.spcname as name,
+                        T.xmin as state_number, pg_catalog.pg_get_userbyid(T.spcowner) as owner,
+                        pg_catalog.pg_tablespace_location(T.oid) /* null */ as location,
+                        T.spcoptions /* null */ as options,
+                        D.description as comment
+                 from pg_catalog.pg_tablespace T
+                   left join pg_catalog.pg_shdescription D on D.objoid = T.oid",
+            )
+            .unwrap();
+        match result {
+            DuckDBQueryResult::Rows { columns, data } => {
+                assert_eq!(columns.len(), 7);
                 assert!(!data.is_empty());
             }
             other => panic!("Expected Rows, got {other:?}"),

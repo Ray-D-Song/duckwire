@@ -17,6 +17,7 @@ pub fn init_pg_compat(conn: &Arc<Mutex<Connection>>) {
     exec(&c, include_str!("../../sql/schema.sql"));
     exec(&c, include_str!("../../sql/pg_database.sql"));
     exec(&c, include_str!("../../sql/pg_tablespace.sql"));
+    exec(&c, include_str!("../../sql/pg_timezone.sql"));
     exec(&c, include_str!("../../sql/pg_roles.sql"));
     exec(&c, include_str!("../../sql/pg_authid.sql"));
     exec(&c, include_str!("../../sql/pg_namespace.sql"));

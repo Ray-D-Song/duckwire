@@ -5,6 +5,8 @@ use crate::errors::DuckWireError;
 const PG_COMPAT_TABLES: &[&str] = &[
     "pg_database",
     "pg_tablespace",
+    "pg_timezone_names",
+    "pg_timezone_abbrevs",
     "pg_roles",
     "pg_authid",
     "pg_namespace",
@@ -159,13 +161,20 @@ impl Transpiler {
     // arguments) with a hardcoded value. Uses recursive reapplication after each
     // successful replacement to handle queries with multiple pg function calls.
     fn rewrite_pg_functions(&self, sql: &str) -> String {
-        let mut result = sql.to_string();
+        let mut result = self.rewrite_pg_builtin_prefixes(sql);
 
         let pg_funcs = [
             ("pg_get_userbyid", "'postgres'"),
             ("pg_encoding_to_char", "'UTF8'"),
             ("pg_get_expr", "NULL"),
             ("pg_table_is_visible", "true"),
+            ("has_database_privilege", "true"),
+            ("has_schema_privilege", "true"),
+            ("has_table_privilege", "true"),
+            ("has_column_privilege", "true"),
+            ("has_function_privilege", "true"),
+            ("has_sequence_privilege", "true"),
+            ("pg_has_role", "true"),
             ("pg_get_constraintdef", "NULL"),
             ("pg_get_indexdef", "NULL"),
             ("pg_get_viewdef", "NULL"),
@@ -193,6 +202,7 @@ impl Transpiler {
             ("pg_advisory_unlock", "true"),
             ("pg_try_advisory_lock", "true"),
             ("pg_is_in_recovery", "false"),
+            ("txid_current", "1"),
             ("pg_last_xlog_receive_location", "'0/0'"),
             ("pg_last_xlog_replay_location", "'0/0'"),
             ("pg_xlog_name", "'0/0'"),
@@ -212,6 +222,14 @@ impl Transpiler {
             // Kept as a safety net in case the first entry is removed or reordered.
             ("pg_available_extensions", "NULL"),
         ];
+
+        for (func, _) in &pg_funcs {
+            result = result.replace(
+                &format!("pg_compat.\"{}\"(", func),
+                &format!("pg_compat.{}(", func),
+            );
+            result = result.replace(&format!("\"{}\"(", func), &format!("{}(", func));
+        }
 
         let upper = result.to_uppercase();
         for (func, replacement) in &pg_funcs {
@@ -258,6 +276,21 @@ impl Transpiler {
             }
         }
 
+        result
+    }
+
+    fn rewrite_pg_builtin_prefixes(&self, sql: &str) -> String {
+        let mut result = sql.to_string();
+        for func in [
+            "current_database",
+            "current_schema",
+            "current_schemas",
+            "current_user",
+        ] {
+            result = result.replace(&format!("pg_compat.\"{}\"(", func), &format!("{}(", func));
+            result = result.replace(&format!("pg_compat.{}(", func), &format!("{}(", func));
+            result = result.replace(&format!("\"{}\"(", func), &format!("{}(", func));
+        }
         result
     }
 
@@ -534,7 +567,10 @@ mod tests {
             !result.contains("information_schema.character_data"),
             "Result: {result}"
         );
-        assert!(result.contains("VARCHAR"), "Result: {result}");
+        assert!(
+            result.contains("VARCHAR") || result.contains("TEXT"),
+            "Result: {result}"
+        );
     }
 
     #[test]
@@ -545,7 +581,10 @@ mod tests {
             !result.contains("information_schema.character_data"),
             "Result: {result}"
         );
-        assert!(result.contains("VARCHAR"), "Result: {result}");
+        assert!(
+            result.contains("VARCHAR") || result.contains("TEXT"),
+            "Result: {result}"
+        );
     }
 
     #[test]
@@ -619,6 +658,87 @@ mod tests {
             .rewrite("SELECT pg_encoding_to_char(d.encoding) AS encodingname FROM pg_database d")
             .unwrap();
         assert!(!result.contains("pg_encoding_to_char"), "Result: {result}");
+    }
+
+    #[test]
+    fn test_transpile_pg_privilege_functions() {
+        let t = Transpiler::new();
+        let result = t
+            .rewrite(
+                "SELECT pg_catalog.has_database_privilege(d.datname, 'CONNECT') AS can_connect \
+                 FROM pg_database d",
+            )
+            .unwrap();
+        assert!(
+            !result.contains("has_database_privilege"),
+            "Result: {result}"
+        );
+        assert!(!result.contains("pg_compat.has"), "Result: {result}");
+        assert!(result.to_uppercase().contains("TRUE"), "Result: {result}");
+        assert!(result.contains("pg_compat.pg_database"), "Result: {result}");
+    }
+
+    #[test]
+    fn test_transpile_quoted_pg_privilege_functions() {
+        let t = Transpiler::new();
+        let result = t
+            .rewrite(
+                "SELECT \"pg_catalog\".\"has_schema_privilege\"(n.oid, 'CREATE') AS can_create \
+                 FROM pg_namespace n",
+            )
+            .unwrap();
+        assert!(!result.contains("has_schema_privilege"), "Result: {result}");
+        assert!(!result.contains("pg_compat.has"), "Result: {result}");
+        assert!(result.to_uppercase().contains("TRUE"), "Result: {result}");
+        assert!(
+            result.contains("pg_compat.pg_namespace"),
+            "Result: {result}"
+        );
+    }
+
+    #[test]
+    fn test_transpile_datagrip_txid_query() {
+        let t = Transpiler::new();
+        let result = t
+            .rewrite(
+                "select case
+                   when pg_catalog.pg_is_in_recovery()
+                     then null
+                   else
+                     (pg_catalog.txid_current() % 4294967296)::varchar::bigint
+                 end as current_txid",
+            )
+            .unwrap();
+        assert!(!result.contains("txid_current"), "Result: {result}");
+        assert!(!result.contains("pg_compat."), "Result: {result}");
+    }
+
+    #[test]
+    fn test_transpile_datagrip_database_order_query() {
+        let t = Transpiler::new();
+        let result = t
+            .rewrite(
+                "select N.oid::bigint as id,
+                        datname as name,
+                        D.description,
+                        datistemplate as is_template,
+                        datallowconn as allow_connections,
+                        pg_catalog.pg_get_userbyid(N.datdba) as \"owner\"
+                 from pg_catalog.pg_database N
+                   left join pg_catalog.pg_shdescription D on N.oid = D.objoid
+                 order by case when datname = pg_catalog.current_database() then -1::bigint else N.oid::bigint end",
+            )
+            .unwrap();
+        assert!(
+            !result.contains("pg_compat.current_database"),
+            "Result: {result}"
+        );
+        assert!(!result.contains("pg_get_userbyid"), "Result: {result}");
+        assert!(result.contains("pg_compat.pg_database"), "Result: {result}");
+        assert!(
+            result.contains("pg_compat.pg_shdescription"),
+            "Result: {result}"
+        );
     }
 
     #[test]

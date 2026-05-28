@@ -10,5 +10,6 @@ SELECT
     NULL::VARCHAR AS datacl,
     false::BOOLEAN AS datistemplate,
     true::BOOLEAN AS datallowconn,
-    -1::INTEGER AS datconnlimit
+    -1::INTEGER AS datconnlimit,
+    NULL::VARCHAR AS description
 ;
