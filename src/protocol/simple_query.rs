@@ -17,7 +17,10 @@ use tracing::{debug, error, info};
 
 use crate::backend::connection::DuckDBConnection;
 use crate::backend::result::DuckDBQueryResult;
-use crate::types::mapping::{arrow_type_to_pg, build_schema_from_columns, encode_duckdb_owned_value};
+use crate::types::mapping::{
+    arrow_type_to_pg, build_schema_from_columns_with_format, encode_duckdb_owned_value,
+    requested_format_for_type,
+};
 
 pub struct DuckWireHandler {
     connection: Arc<DuckDBConnection>,
@@ -39,7 +42,7 @@ impl DuckWireHandler {
     fn execute_query_with_format(
         &self,
         query: &str,
-        _result_format: Option<&Format>,
+        result_format: Option<&Format>,
     ) -> PgWireResult<Vec<Response>> {
         let mut session = self.connection.create_session();
         let result = session.execute(query).map_err(|e| {
@@ -49,7 +52,7 @@ impl DuckWireHandler {
 
         match result {
             DuckDBQueryResult::Rows { columns, data } => {
-                let schema = build_schema_from_columns(&columns)
+                let schema = build_schema_from_columns_with_format(&columns, result_format)
                     .map_err(|e| pgwire::error::PgWireError::ApiError(Box::new(e)))?;
 
                 let row_count = data.len();
@@ -93,7 +96,7 @@ impl DuckWireHandler {
     fn get_query_schema_with_format(
         &self,
         sql: &str,
-        _result_format: Option<&Format>,
+        result_format: Option<&Format>,
     ) -> PgWireResult<Vec<FieldInfo>> {
         let null_sql = replace_params_with_null(sql);
         let rewritten = self
@@ -133,16 +136,8 @@ impl DuckWireHandler {
             .map(|i| {
                 let name = column_names[i].clone();
                 let pg_type = arrow_type_to_pg(&stmt.column_type(i)).unwrap_or(Type::UNKNOWN);
-                // DuckWire currently encodes all values as PostgreSQL text-format
-                // payloads. Advertising binary format makes drivers decode text as
-                // PostgreSQL binary values, which breaks types such as timestamp.
-                FieldInfo::new(
-                    name,
-                    None,
-                    None,
-                    pg_type,
-                    pgwire::api::results::FieldFormat::Text,
-                )
+                let format = requested_format_for_type(result_format, i, &pg_type);
+                FieldInfo::new(name, None, None, pg_type, format)
             })
             .collect();
         Ok(fields)

@@ -3,6 +3,7 @@
 FROM rust:1-bookworm AS builder
 
 WORKDIR /app
+ENV RUSTFLAGS="-L native=/app/target/release/deps"
 
 # 1. Cache dependency compilation by building a dummy project first
 COPY Cargo.toml Cargo.lock ./
@@ -16,7 +17,7 @@ RUN cargo build --release && rm -rf src
 COPY src/ src/
 
 # Touch files to invalidate cargo cache for the real source
-RUN touch src/main.rs src/lib.rs && RUSTFLAGS="-L native=/app/target/release/deps" cargo build --release
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 FROM debian:bookworm-slim
 

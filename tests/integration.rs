@@ -4,7 +4,9 @@ mod integration {
     use arrow::datatypes::DataType;
     use duckdb::types::ValueRef;
     use pgwire::api::Type;
+    use pgwire::api::portal::Format;
     use pgwire::api::results::DataRowEncoder;
+    use pgwire::api::results::FieldFormat;
 
     use duckwire::backend::catalog::init_pg_compat;
     use duckwire::backend::result::DuckDBQueryResult;
@@ -12,7 +14,7 @@ mod integration {
     use duckwire::rewrite::Transpiler;
     use duckwire::types::mapping::{
         arrow_type_to_pg, build_schema_from_columns, encode_duckdb_owned_value,
-        encode_duckdb_value,
+        encode_duckdb_value, requested_format_for_type,
     };
 
     fn make_session() -> DuckDBSession {
@@ -48,6 +50,55 @@ mod integration {
             Type::TIMESTAMP
         );
         assert_eq!(arrow_type_to_pg(&DataType::Null).unwrap(), Type::UNKNOWN);
+    }
+
+    #[test]
+    fn test_result_format_honors_client_request() {
+        assert_eq!(
+            requested_format_for_type(Some(&Format::UnifiedBinary), 0, &Type::INT8),
+            FieldFormat::Binary
+        );
+        assert_eq!(
+            requested_format_for_type(Some(&Format::UnifiedBinary), 0, &Type::NUMERIC),
+            FieldFormat::Binary
+        );
+        let individual = Format::Individual(vec![0, 1]);
+        assert_eq!(
+            requested_format_for_type(Some(&individual), 0, &Type::INT8),
+            FieldFormat::Text
+        );
+        assert_eq!(
+            requested_format_for_type(Some(&individual), 1, &Type::TIMESTAMP),
+            FieldFormat::Binary
+        );
+        assert_eq!(
+            requested_format_for_type(Some(&Format::UnifiedText), 0, &Type::INT8),
+            FieldFormat::Text
+        );
+        assert_eq!(
+            requested_format_for_type(None, 0, &Type::INT8),
+            FieldFormat::Text
+        );
+    }
+
+    #[test]
+    fn test_timestamp_can_encode_as_binary() {
+        let schema = std::sync::Arc::new(vec![pgwire::api::results::FieldInfo::new(
+            "triggerTime".into(),
+            None,
+            None,
+            Type::TIMESTAMP,
+            FieldFormat::Binary,
+        )]);
+        let mut encoder = DataRowEncoder::new(schema);
+
+        encode_duckdb_value(
+            &mut encoder,
+            ValueRef::Timestamp(duckdb::types::TimeUnit::Microsecond, 1_779_971_256_000_000),
+        )
+        .unwrap();
+
+        let _row = encoder.take_row();
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use duckdb::types::{Value, ValueRef};
 use pgwire::api::Type;
+use pgwire::api::portal::Format;
 use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
 use std::sync::Arc;
 
@@ -51,14 +52,16 @@ pub fn arrow_type_to_pg(dt: &DataType) -> Result<Type, DuckWireError> {
 }
 
 pub fn build_field_info(name: &str, dt: &DataType) -> Result<FieldInfo, DuckWireError> {
+    build_field_info_with_format(name, dt, FieldFormat::Text)
+}
+
+pub fn build_field_info_with_format(
+    name: &str,
+    dt: &DataType,
+    format: FieldFormat,
+) -> Result<FieldInfo, DuckWireError> {
     let pg_type = arrow_type_to_pg(dt)?;
-    Ok(FieldInfo::new(
-        name.into(),
-        None,
-        None,
-        pg_type,
-        FieldFormat::Text,
-    ))
+    Ok(FieldInfo::new(name.into(), None, None, pg_type, format))
 }
 
 pub fn build_schema_from_columns(
@@ -69,6 +72,38 @@ pub fn build_schema_from_columns(
         .map(|(name, dt)| build_field_info(name, dt))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Arc::new(fields))
+}
+
+pub fn build_schema_from_columns_with_format(
+    columns: &[(String, DataType)],
+    result_format: Option<&Format>,
+) -> Result<Arc<Vec<FieldInfo>>, DuckWireError> {
+    let fields: Vec<FieldInfo> = columns
+        .iter()
+        .enumerate()
+        .map(|(idx, (name, dt))| {
+            let pg_type = arrow_type_to_pg(dt)?;
+            let format = requested_format_for_type(result_format, idx, &pg_type);
+            Ok(FieldInfo::new(name.into(), None, None, pg_type, format))
+        })
+        .collect::<Result<Vec<_>, DuckWireError>>()?;
+    Ok(Arc::new(fields))
+}
+
+pub fn requested_format_for_type(
+    result_format: Option<&Format>,
+    idx: usize,
+    _pg_type: &Type,
+) -> FieldFormat {
+    match result_format {
+        Some(Format::UnifiedBinary) => FieldFormat::Binary,
+        Some(Format::UnifiedText) | None => FieldFormat::Text,
+        Some(Format::Individual(formats)) => formats
+            .get(idx)
+            .copied()
+            .map(FieldFormat::from)
+            .unwrap_or(FieldFormat::Text),
+    }
 }
 
 fn encode_text(encoder: &mut DataRowEncoder, val: &str) -> Result<(), DuckWireError> {
@@ -97,82 +132,7 @@ pub fn encode_duckdb_value(
         ValueRef::UInt(i) => encode_text(encoder, &i.to_string()),
         ValueRef::UBigInt(i) => encode_text(encoder, &i.to_string()),
         ValueRef::Decimal(d) => encode_text(encoder, &d.to_string()),
-        // Manual Gregorian calendar conversion from epoch microseconds.
-        // DuckDB timestamps are stored as micros since 1970-01-01 UTC.
-        // Avoids pulling in a heavy date library.
-        // NOTE: assumes post-epoch timestamps (no negative day counts).
-        ValueRef::Timestamp(_, ts) => {
-            let micros = ts;
-            let secs = micros / 1_000_000;
-            let remain_micros = micros % 1_000_000;
-            let days_since_epoch = secs / 86400;
-            let time_secs = secs % 86400;
-            let hours = time_secs / 3600;
-            let mins = (time_secs % 3600) / 60;
-            let secs_rem = time_secs % 60;
-            // Walk forward from 1970 to find the year
-            let mut year: i32 = 1970;
-            let mut remaining = days_since_epoch;
-            loop {
-                let days_in_year = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
-                    366
-                } else {
-                    365
-                };
-                if remaining < days_in_year {
-                    break;
-                }
-                remaining -= days_in_year;
-                year += 1;
-            }
-            let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-            let month_days = [
-                31,
-                if is_leap { 29 } else { 28 },
-                31,
-                30,
-                31,
-                30,
-                31,
-                31,
-                30,
-                31,
-                30,
-                31,
-            ];
-            let mut month: usize = 0;
-            for (i, &md) in month_days.iter().enumerate() {
-                if remaining < md {
-                    month = i;
-                    break;
-                }
-                remaining -= md;
-            }
-            let day = remaining + 1;
-            let result = if remain_micros > 0 {
-                let frac_str = format!("{:06}", remain_micros)
-                    .trim_end_matches('0')
-                    .to_string();
-                format!(
-                    "{year:04}-{:02}-{:02} {:02}:{:02}:{:02}.{frac_str}",
-                    month + 1,
-                    day,
-                    hours,
-                    mins,
-                    secs_rem
-                )
-            } else {
-                format!(
-                    "{year:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                    month + 1,
-                    day,
-                    hours,
-                    mins,
-                    secs_rem
-                )
-            };
-            encode_text(encoder, &result)
-        }
+        ValueRef::Timestamp(unit, ts) => encode_timestamp(encoder, unit.to_micros(ts)),
         ValueRef::Text(t) => match std::str::from_utf8(t) {
             Ok(s) => encode_text(encoder, s),
             Err(_) => encode_text(encoder, &format!("{:?}", t)),
@@ -200,6 +160,15 @@ pub fn encode_duckdb_value(
     }
 }
 
+fn encode_timestamp(encoder: &mut DataRowEncoder, micros: i64) -> Result<(), DuckWireError> {
+    let dt = chrono::DateTime::from_timestamp_micros(micros)
+        .ok_or_else(|| DuckWireError::Protocol(format!("timestamp out of range: {micros}")))?
+        .naive_utc();
+    encoder
+        .encode_field(&dt)
+        .map_err(|e| DuckWireError::Protocol(e.to_string()))
+}
+
 pub fn encode_duckdb_owned_value(
     encoder: &mut DataRowEncoder,
     value: &Value,
@@ -208,7 +177,9 @@ pub fn encode_duckdb_owned_value(
         Value::List(values) | Value::Array(values) => {
             encode_text(encoder, &format_pg_array_literal(values))
         }
-        Value::Struct(_) | Value::Map(_) | Value::Union(_) => encode_text(encoder, &format!("{value:?}")),
+        Value::Struct(_) | Value::Map(_) | Value::Union(_) => {
+            encode_text(encoder, &format!("{value:?}"))
+        }
         Value::Enum(s) => encode_text(encoder, s),
         _ => encode_duckdb_value(encoder, ValueRef::from(value)),
     }
@@ -255,8 +226,12 @@ fn format_pg_array_element(value: &Value) -> String {
             days,
             nanos,
         } => quote_pg_array_element(&format!("{months} mons {days} days {nanos} ns")),
-        Value::List(values) | Value::Array(values) => quote_pg_array_element(&format_pg_array_literal(values)),
-        Value::Struct(_) | Value::Map(_) | Value::Union(_) => quote_pg_array_element(&format!("{value:?}")),
+        Value::List(values) | Value::Array(values) => {
+            quote_pg_array_element(&format_pg_array_literal(values))
+        }
+        Value::Struct(_) | Value::Map(_) | Value::Union(_) => {
+            quote_pg_array_element(&format!("{value:?}"))
+        }
     }
 }
 
