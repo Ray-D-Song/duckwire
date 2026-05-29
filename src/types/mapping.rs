@@ -51,6 +51,39 @@ pub fn arrow_type_to_pg(dt: &DataType) -> Result<Type, DuckWireError> {
     }
 }
 
+pub fn column_type_to_pg(name: &str, dt: &DataType) -> Result<Type, DuckWireError> {
+    if is_pg_catalog_char_column(name) {
+        return Ok(Type::BPCHAR);
+    }
+    arrow_type_to_pg(dt)
+}
+
+fn is_pg_catalog_char_column(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "relkind"
+            | "kind"
+            | "object_kind"
+            | "table_kind"
+            | "view_kind"
+            | "con_kind"
+            | "contype"
+            | "type_sub_kind"
+            | "typtype"
+            | "typcategory"
+            | "oprkind"
+            | "aggkind"
+            | "ev_type"
+            | "polcmd"
+            | "relpersistence"
+            | "persistence"
+            | "prokind"
+            | "proparallel"
+            | "attidentity"
+            | "attgenerated"
+    )
+}
+
 pub fn build_field_info(name: &str, dt: &DataType) -> Result<FieldInfo, DuckWireError> {
     build_field_info_with_format(name, dt, FieldFormat::Text)
 }
@@ -60,7 +93,7 @@ pub fn build_field_info_with_format(
     dt: &DataType,
     format: FieldFormat,
 ) -> Result<FieldInfo, DuckWireError> {
-    let pg_type = arrow_type_to_pg(dt)?;
+    let pg_type = column_type_to_pg(name, dt)?;
     Ok(FieldInfo::new(name.into(), None, None, pg_type, format))
 }
 
@@ -82,7 +115,7 @@ pub fn build_schema_from_columns_with_format(
         .iter()
         .enumerate()
         .map(|(idx, (name, dt))| {
-            let pg_type = arrow_type_to_pg(dt)?;
+            let pg_type = column_type_to_pg(name, dt)?;
             let format = requested_format_for_type(result_format, idx, &pg_type);
             Ok(FieldInfo::new(name.into(), None, None, pg_type, format))
         })

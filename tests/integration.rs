@@ -13,7 +13,7 @@ mod integration {
     use duckwire::backend::session::DuckDBSession;
     use duckwire::rewrite::Transpiler;
     use duckwire::types::mapping::{
-        arrow_type_to_pg, build_schema_from_columns, encode_duckdb_owned_value,
+        arrow_type_to_pg, build_schema_from_columns, column_type_to_pg, encode_duckdb_owned_value,
         encode_duckdb_value, requested_format_for_type,
     };
 
@@ -50,6 +50,22 @@ mod integration {
             Type::TIMESTAMP
         );
         assert_eq!(arrow_type_to_pg(&DataType::Null).unwrap(), Type::UNKNOWN);
+    }
+
+    #[test]
+    fn test_catalog_object_kind_columns_use_pg_char_like_type() {
+        assert_eq!(
+            column_type_to_pg("object_kind", &DataType::Utf8).unwrap(),
+            Type::BPCHAR
+        );
+        assert_eq!(
+            column_type_to_pg("relkind", &DataType::Utf8).unwrap(),
+            Type::BPCHAR
+        );
+        assert_eq!(
+            column_type_to_pg("table_name", &DataType::Utf8).unwrap(),
+            Type::TEXT
+        );
     }
 
     #[test]
@@ -619,6 +635,82 @@ mod integration {
             DuckDBQueryResult::Rows { columns, data } => {
                 assert_eq!(columns.len(), 3);
                 assert_eq!(data.len(), 1);
+            }
+            other => panic!("Expected Rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_datagrip_update_with_ctid_predicate() {
+        let mut session = make_session();
+        session
+            .execute("CREATE TABLE xxl_job_log(id BIGINT, alarm_status INTEGER)")
+            .unwrap();
+        session
+            .execute("INSERT INTO xxl_job_log VALUES (1, 0)")
+            .unwrap();
+
+        let result = session
+            .execute("UPDATE xxl_job_log SET alarm_status = 1 WHERE alarm_status = 0 AND CTID = 0")
+            .unwrap();
+        match result {
+            DuckDBQueryResult::Affected(n) => assert_eq!(n, 1),
+            other => panic!("Expected Affected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_catalog_datagrip_user_table_object_kind() {
+        let mut session = make_session();
+        session
+            .execute("CREATE TABLE log_info_interface_log(id BIGINT)")
+            .unwrap();
+
+        let result = session
+            .execute(
+                "SELECT relname AS object_name, relkind AS object_kind
+                 FROM pg_catalog.pg_class
+                 WHERE relname = 'log_info_interface_log'",
+            )
+            .unwrap();
+
+        match result {
+            DuckDBQueryResult::Rows { columns, data } => {
+                assert_eq!(columns.len(), 2);
+                assert_eq!(data.len(), 1);
+                assert_eq!(
+                    data[0][0],
+                    duckdb::types::Value::Text("log_info_interface_log".into())
+                );
+                assert_eq!(data[0][1], duckdb::types::Value::Text("r".into()));
+            }
+            other => panic!("Expected Rows, got {other:?}"),
+        }
+
+        let result = session
+            .execute(
+                "select T.oid as oid,
+                        relnamespace as schemaId,
+                        pg_catalog.translate(relkind, 'rmvpfS', 'rmvrfS') as kind,
+                        relname as name
+                 from pg_catalog.pg_class T
+                 where relnamespace in ( 2200 )
+                   and relkind in ('r', 'm', 'v', 'p', 'f', 'S')
+                 order by schemaId",
+            )
+            .unwrap();
+
+        match result {
+            DuckDBQueryResult::Rows { columns, data } => {
+                assert_eq!(columns.len(), 4);
+                let row = data
+                    .iter()
+                    .find(|row| {
+                        row.get(3)
+                            == Some(&duckdb::types::Value::Text("log_info_interface_log".into()))
+                    })
+                    .expect("expected DataGrip object list to include user table");
+                assert_eq!(row[2], duckdb::types::Value::Text("r".into()));
             }
             other => panic!("Expected Rows, got {other:?}"),
         }

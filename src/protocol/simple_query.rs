@@ -18,7 +18,7 @@ use tracing::{debug, error, info};
 use crate::backend::connection::DuckDBConnection;
 use crate::backend::result::DuckDBQueryResult;
 use crate::types::mapping::{
-    arrow_type_to_pg, build_schema_from_columns_with_format, encode_duckdb_owned_value,
+    build_schema_from_columns_with_format, column_type_to_pg, encode_duckdb_owned_value,
     requested_format_for_type,
 };
 
@@ -135,7 +135,8 @@ impl DuckWireHandler {
         let fields: Vec<FieldInfo> = (0..column_count)
             .map(|i| {
                 let name = column_names[i].clone();
-                let pg_type = arrow_type_to_pg(&stmt.column_type(i)).unwrap_or(Type::UNKNOWN);
+                let pg_type =
+                    column_type_to_pg(&name, &stmt.column_type(i)).unwrap_or(Type::UNKNOWN);
                 let format = requested_format_for_type(result_format, i, &pg_type);
                 FieldInfo::new(name, None, None, pg_type, format)
             })

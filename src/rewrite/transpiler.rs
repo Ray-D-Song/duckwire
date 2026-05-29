@@ -59,6 +59,14 @@ const PG_COMPAT_TABLES: &[&str] = &[
 
 pub struct Transpiler;
 
+struct PgSchemaFunction<'a> {
+    start: usize,
+    func_start: usize,
+    open: usize,
+    func_name: String,
+    replacement: &'a str,
+}
+
 impl Transpiler {
     pub fn new() -> Self {
         Self
@@ -310,30 +318,67 @@ impl Transpiler {
             }
         }
 
+        let result = Self::rewrite_native_pg_schema_functions(&result);
         Self::rewrite_unknown_pg_schema_functions(&result)
+    }
+
+    fn rewrite_native_pg_schema_functions(sql: &str) -> String {
+        let mut result = sql.to_string();
+        while let Some((start, func_start)) = Self::find_native_pg_schema_function(&result) {
+            result.replace_range(start..func_start, "");
+        }
+        result
+    }
+
+    fn find_native_pg_schema_function(sql: &str) -> Option<(usize, usize)> {
+        Self::find_pg_schema_function(sql, |func_name| {
+            matches!(
+                func_name.to_ascii_lowercase().as_str(),
+                "upper" | "lower" | "translate"
+            )
+        })
+        .map(|found| (found.start, found.func_start))
     }
 
     fn rewrite_unknown_pg_schema_functions(sql: &str) -> String {
         let mut result = sql.to_string();
 
         loop {
-            let Some((start, open, replacement)) = Self::find_unknown_pg_schema_function(&result)
-            else {
+            let Some(found) = Self::find_unknown_pg_schema_function(&result) else {
                 break;
             };
-            let Some(end) = Self::find_matching_paren(&result, open) else {
+            let Some(end) = Self::find_matching_paren(&result, found.open) else {
                 break;
             };
-            result = format!("{}{}{}", &result[..start], replacement, &result[end + 1..]);
+            result = format!(
+                "{}{}{}",
+                &result[..found.start],
+                found.replacement,
+                &result[end + 1..]
+            );
         }
 
         result
     }
 
-    fn find_unknown_pg_schema_function(sql: &str) -> Option<(usize, usize, &'static str)> {
+    fn find_unknown_pg_schema_function(sql: &str) -> Option<PgSchemaFunction<'static>> {
+        Self::find_pg_schema_function(sql, |_| true).map(|mut found| {
+            found.replacement = if found.func_name.eq_ignore_ascii_case("age") {
+                "0::BIGINT"
+            } else {
+                "NULL"
+            };
+            found
+        })
+    }
+
+    fn find_pg_schema_function(
+        sql: &str,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Option<PgSchemaFunction<'static>> {
         let upper = sql.to_uppercase();
 
-        let mut best: Option<(usize, usize, &'static str)> = None;
+        let mut best: Option<PgSchemaFunction<'static>> = None;
         for schema in ["PG_COMPAT", "\"PG_COMPAT\"", "PG_CATALOG", "\"PG_CATALOG\""] {
             let mut offset = 0;
             while let Some(pos) = upper[offset..].find(schema) {
@@ -361,6 +406,7 @@ impl Transpiler {
                     i += 1;
                 }
 
+                let func_start = i;
                 let (func_name, mut after_name) = if sql.as_bytes().get(i) == Some(&b'"') {
                     let name_start = i + 1;
                     let Some(end_rel) = sql[name_start..].find('"') else {
@@ -386,6 +432,11 @@ impl Transpiler {
                     (&sql[name_start..i], i)
                 };
 
+                if !predicate(func_name) {
+                    offset = start + schema.len();
+                    continue;
+                }
+
                 while sql
                     .as_bytes()
                     .get(after_name)
@@ -396,14 +447,16 @@ impl Transpiler {
                 }
 
                 if sql.as_bytes().get(after_name) == Some(&b'(') {
-                    let replacement = if func_name.eq_ignore_ascii_case("age") {
-                        "0::BIGINT"
-                    } else {
-                        "NULL"
+                    let found = PgSchemaFunction {
+                        start,
+                        func_start,
+                        open: after_name,
+                        func_name: func_name.to_string(),
+                        replacement: "",
                     };
                     match best {
-                        Some((best_start, _, _)) if best_start < start => {}
-                        _ => best = Some((start, after_name, replacement)),
+                        Some(ref best_found) if best_found.start < start => {}
+                        _ => best = Some(found),
                     }
                 }
 
@@ -744,7 +797,84 @@ impl Transpiler {
             result = result.replace(&format!(", {ctid},"), ", 0::BIGINT AS CTID,");
             result = result.replace(&format!("SELECT {ctid},"), "SELECT 0::BIGINT AS CTID,");
         }
+        Self::rewrite_ctid_predicates(&result)
+    }
+
+    fn rewrite_ctid_predicates(sql: &str) -> String {
+        let mut result = sql.to_string();
+        loop {
+            let Some((start, end)) = Self::find_ctid_equality_predicate(&result) else {
+                break;
+            };
+            result.replace_range(start..end, "TRUE");
+        }
         result
+    }
+
+    fn find_ctid_equality_predicate(sql: &str) -> Option<(usize, usize)> {
+        let upper = sql.to_uppercase();
+        let mut offset = 0;
+
+        while let Some(pos) = upper[offset..].find("CTID") {
+            let start = offset + pos;
+            let end_name = start + 4;
+            let before_ok = start == 0
+                || !upper
+                    .as_bytes()
+                    .get(start - 1)
+                    .map(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+                    .unwrap_or(false);
+            let after_ok = end_name >= upper.len()
+                || !upper
+                    .as_bytes()
+                    .get(end_name)
+                    .map(|&b| b.is_ascii_alphanumeric() || b == b'_')
+                    .unwrap_or(false);
+
+            if before_ok && after_ok {
+                let mut i = end_name;
+                while upper
+                    .as_bytes()
+                    .get(i)
+                    .map(|b| b.is_ascii_whitespace())
+                    .unwrap_or(false)
+                {
+                    i += 1;
+                }
+                if upper.as_bytes().get(i) == Some(&b'=') {
+                    i += 1;
+                    while upper
+                        .as_bytes()
+                        .get(i)
+                        .map(|b| b.is_ascii_whitespace())
+                        .unwrap_or(false)
+                    {
+                        i += 1;
+                    }
+
+                    let value_start = i;
+                    if upper.as_bytes().get(i) == Some(&b'$') {
+                        i += 1;
+                    }
+                    while upper
+                        .as_bytes()
+                        .get(i)
+                        .map(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+                        .unwrap_or(false)
+                    {
+                        i += 1;
+                    }
+
+                    if i > value_start {
+                        return Some((start, i));
+                    }
+                }
+            }
+
+            offset = end_name;
+        }
+
+        None
     }
 
     fn rewrite_info_schema(&self, sql: &str) -> String {
@@ -1165,6 +1295,33 @@ mod tests {
             .unwrap();
         assert!(!result.contains("'{r,v,m}'"), "Result: {result}");
         assert!(result.contains("['r'"), "Result: {result}");
+    }
+
+    #[test]
+    fn test_transpile_pg_catalog_native_string_functions() {
+        let t = Transpiler::new();
+        let result = t
+            .rewrite(
+                "SELECT pg_catalog.translate(relkind, 'rmvpfS', 'rmvrfS') AS kind,
+                        pg_catalog.upper(relkind) AS table_kind
+                 FROM pg_class",
+            )
+            .unwrap();
+        assert!(!result.contains("NULL AS kind"), "Result: {result}");
+        assert!(!result.contains("NULL AS table_kind"), "Result: {result}");
+        assert!(result.contains("TRANSLATE("), "Result: {result}");
+        assert!(result.contains("UPPER("), "Result: {result}");
+    }
+
+    #[test]
+    fn test_transpile_ctid_predicate() {
+        let t = Transpiler::new();
+        let result = t
+            .rewrite("UPDATE public.xxl_job_log SET alarm_status = 1 WHERE alarm_status = 0 AND CTID = 0")
+            .unwrap();
+        assert!(!result.contains("CTID"), "Result: {result}");
+        assert!(result.contains("AND TRUE"), "Result: {result}");
+        assert!(result.contains("main.xxl_job_log"), "Result: {result}");
     }
 
     #[test]
