@@ -231,6 +231,24 @@ mod integration {
     }
 
     #[test]
+    fn test_session_rolls_back_after_query_error() {
+        let mut session = make_session();
+        session.execute("BEGIN").unwrap();
+
+        assert!(
+            session
+                .execute("SELECT * FROM definitely_missing_table")
+                .is_err()
+        );
+
+        let result = session.execute("SELECT 'x'").unwrap();
+        match result {
+            DuckDBQueryResult::Rows { data, .. } => assert_eq!(data.len(), 1),
+            other => panic!("Expected Rows after automatic rollback, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_current_schemas_list_result_does_not_panic() {
         let mut session = make_session();
 

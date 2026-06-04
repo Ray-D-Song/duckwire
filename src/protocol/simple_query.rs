@@ -122,9 +122,14 @@ impl DuckWireHandler {
 
         let mut stmt = match conn.prepare(&rewritten) {
             Ok(s) => s,
-            Err(_) => return Ok(vec![]),
+            Err(e) => {
+                rollback_after_schema_error(&conn, &rewritten, &e);
+                return Ok(vec![]);
+            }
         };
-        if stmt.execute([]).is_err() {
+        if let Err(e) = stmt.execute([]) {
+            drop(stmt);
+            rollback_after_schema_error(&conn, &rewritten, &e);
             return Ok(vec![]);
         }
         let column_count = stmt.column_count();
@@ -142,6 +147,22 @@ impl DuckWireHandler {
             })
             .collect();
         Ok(fields)
+    }
+}
+
+fn rollback_after_schema_error(conn: &duckdb::Connection, sql: &str, err: &duckdb::Error) {
+    match conn.execute_batch("ROLLBACK") {
+        Ok(_) => info!(
+            query = %sql.trim(),
+            error = %err,
+            "rolled back after schema probe error"
+        ),
+        Err(rollback_err) => debug!(
+            query = %sql.trim(),
+            error = %err,
+            rollback_error = %rollback_err,
+            "rollback after schema probe error was not needed or failed"
+        ),
     }
 }
 

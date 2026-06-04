@@ -22,6 +22,16 @@ impl DuckDBSession {
     }
 
     pub fn execute(&mut self, sql: &str) -> Result<DuckDBQueryResult, duckdb::Error> {
+        let result = self.execute_inner(sql);
+        if let Err(ref err) = result {
+            if !sql.trim().to_uppercase().starts_with("ROLLBACK") {
+                self.rollback_after_error(sql, err);
+            }
+        }
+        result
+    }
+
+    fn execute_inner(&mut self, sql: &str) -> Result<DuckDBQueryResult, duckdb::Error> {
         let rewritten = self
             .transpiler
             .rewrite(sql)
@@ -109,6 +119,27 @@ impl DuckDBSession {
             let affected = conn.execute(&rewritten, [])?;
             info!(affected, "query completed");
             Ok(DuckDBQueryResult::Affected(affected as u64))
+        }
+    }
+
+    fn rollback_after_error(&mut self, sql: &str, err: &duckdb::Error) {
+        self.in_transaction = false;
+        match self.conn.lock() {
+            Ok(conn) => match conn.execute_batch("ROLLBACK") {
+                Ok(_) => info!(query = %sql.trim(), error = %err, "rolled back after query error"),
+                Err(rollback_err) => debug!(
+                    query = %sql.trim(),
+                    error = %err,
+                    rollback_error = %rollback_err,
+                    "rollback after query error was not needed or failed"
+                ),
+            },
+            Err(lock_err) => error!(
+                query = %sql.trim(),
+                error = %err,
+                lock_error = %lock_err,
+                "failed to acquire connection lock for rollback after query error"
+            ),
         }
     }
 }
