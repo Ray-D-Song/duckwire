@@ -1,5 +1,8 @@
 mod integration {
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use arrow::datatypes::DataType;
     use duckdb::types::ValueRef;
@@ -9,6 +12,7 @@ mod integration {
     use pgwire::api::results::FieldFormat;
 
     use duckwire::backend::catalog::init_pg_compat;
+    use duckwire::backend::connection::DuckDBConnection;
     use duckwire::backend::result::DuckDBQueryResult;
     use duckwire::backend::session::DuckDBSession;
     use duckwire::rewrite::Transpiler;
@@ -22,6 +26,14 @@ mod integration {
         init_pg_compat(&conn);
         let transpiler = Arc::new(Transpiler::new());
         DuckDBSession::new(conn, transpiler)
+    }
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("duckwire-{name}-{}-{nanos}.db", std::process::id()))
     }
 
     #[test]
@@ -246,6 +258,23 @@ mod integration {
             DuckDBQueryResult::Rows { data, .. } => assert_eq!(data.len(), 1),
             other => panic!("Expected Rows after automatic rollback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_file_connection_creates_independent_sessions() {
+        let path = temp_db_path("independent-sessions");
+        let path_str = path.to_string_lossy().to_string();
+        let connection = DuckDBConnection::open(Some(&path_str)).unwrap();
+
+        let mut session_a = connection.create_session().unwrap();
+        let mut session_b = connection.create_session().unwrap();
+
+        session_a.execute("BEGIN").unwrap();
+        session_b.execute("BEGIN").unwrap();
+        session_a.execute("ROLLBACK").unwrap();
+        session_b.execute("ROLLBACK").unwrap();
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]

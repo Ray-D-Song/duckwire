@@ -6,8 +6,13 @@ use crate::backend::catalog::init_pg_compat;
 use crate::backend::session::DuckDBSession;
 use crate::rewrite::Transpiler;
 
+enum DuckDBConnectionMode {
+    File(String),
+    Shared(Arc<Mutex<Connection>>),
+}
+
 pub struct DuckDBConnection {
-    pub conn: Arc<Mutex<Connection>>,
+    mode: DuckDBConnectionMode,
     pub transpiler: Arc<Transpiler>,
 }
 
@@ -19,13 +24,21 @@ impl DuckDBConnection {
         };
         let arc_conn = Arc::new(Mutex::new(conn));
         init_pg_compat(&arc_conn);
+        let mode = match path {
+            Some(p) => DuckDBConnectionMode::File(p.to_string()),
+            None => DuckDBConnectionMode::Shared(arc_conn),
+        };
         Ok(Self {
-            conn: arc_conn,
+            mode,
             transpiler: Arc::new(Transpiler::new()),
         })
     }
 
-    pub fn create_session(&self) -> DuckDBSession {
-        DuckDBSession::new(self.conn.clone(), self.transpiler.clone())
+    pub fn create_session(&self) -> Result<DuckDBSession, duckdb::Error> {
+        let conn = match &self.mode {
+            DuckDBConnectionMode::File(path) => Arc::new(Mutex::new(Connection::open(path)?)),
+            DuckDBConnectionMode::Shared(conn) => conn.clone(),
+        };
+        Ok(DuckDBSession::new(conn, self.transpiler.clone()))
     }
 }

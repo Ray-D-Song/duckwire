@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::stream;
@@ -17,10 +17,12 @@ use tracing::{debug, error, info};
 
 use crate::backend::connection::DuckDBConnection;
 use crate::backend::result::DuckDBQueryResult;
-use crate::types::mapping::{
-    build_schema_from_columns_with_format, column_type_to_pg, encode_duckdb_owned_value,
-    requested_format_for_type,
-};
+use crate::backend::session::DuckDBSession;
+use crate::types::mapping::{build_schema_from_columns_with_format, encode_duckdb_owned_value};
+
+struct ClientDuckDBSession {
+    session: Mutex<DuckDBSession>,
+}
 
 pub struct DuckWireHandler {
     connection: Arc<DuckDBConnection>,
@@ -35,20 +37,53 @@ impl DuckWireHandler {
         }
     }
 
-    fn execute_query(&self, query: &str) -> PgWireResult<Vec<Response>> {
-        self.execute_query_with_format(query, None)
-    }
+    fn client_session<C>(&self, client: &C) -> PgWireResult<Arc<ClientDuckDBSession>>
+    where
+        C: ClientInfo + Unpin + Send + Sync,
+    {
+        if let Some(session) = client.session_extensions().get::<ClientDuckDBSession>() {
+            return Ok(session);
+        }
 
-    fn execute_query_with_format(
-        &self,
-        query: &str,
-        result_format: Option<&Format>,
-    ) -> PgWireResult<Vec<Response>> {
-        let mut session = self.connection.create_session();
-        let result = session.execute(query).map_err(|e| {
-            error!(query = %query.trim(), error = %e, "query failed");
+        let session = self.connection.create_session().map_err(|e| {
+            error!(error = %e, "failed to create DuckDB session");
             pgwire::error::PgWireError::ApiError(Box::new(e))
         })?;
+        Ok(client
+            .session_extensions()
+            .get_or_insert_with(|| ClientDuckDBSession {
+                session: Mutex::new(session),
+            }))
+    }
+
+    fn execute_query<C>(&self, client: &C, query: &str) -> PgWireResult<Vec<Response>>
+    where
+        C: ClientInfo + Unpin + Send + Sync,
+    {
+        self.execute_query_with_format(client, query, None)
+    }
+
+    fn execute_query_with_format<C>(
+        &self,
+        client: &C,
+        query: &str,
+        result_format: Option<&Format>,
+    ) -> PgWireResult<Vec<Response>>
+    where
+        C: ClientInfo + Unpin + Send + Sync,
+    {
+        let session = self.client_session(client)?;
+        let result = {
+            let mut session = session.session.lock().map_err(|e| {
+                pgwire::error::PgWireError::ApiError(Box::new(duckdb::Error::InvalidColumnName(
+                    format!("{e}"),
+                )))
+            })?;
+            session.execute(query).map_err(|e| {
+                error!(query = %query.trim(), error = %e, "query failed");
+                pgwire::error::PgWireError::ApiError(Box::new(e))
+            })?
+        };
 
         match result {
             DuckDBQueryResult::Rows { columns, data } => {
@@ -89,80 +124,38 @@ impl DuckWireHandler {
         }
     }
 
-    fn get_query_schema(&self, sql: &str) -> PgWireResult<Vec<FieldInfo>> {
-        self.get_query_schema_with_format(sql, None)
+    fn get_query_schema<C>(&self, client: &C, sql: &str) -> PgWireResult<Vec<FieldInfo>>
+    where
+        C: ClientInfo + Unpin + Send + Sync,
+    {
+        self.get_query_schema_with_format(client, sql, None)
     }
 
-    fn get_query_schema_with_format(
+    fn get_query_schema_with_format<C>(
         &self,
+        client: &C,
         sql: &str,
         result_format: Option<&Format>,
-    ) -> PgWireResult<Vec<FieldInfo>> {
+    ) -> PgWireResult<Vec<FieldInfo>>
+    where
+        C: ClientInfo + Unpin + Send + Sync,
+    {
         let null_sql = replace_params_with_null(sql);
-        let rewritten = self
-            .connection
-            .transpiler
-            .rewrite(&null_sql)
-            .unwrap_or_else(|_| null_sql.clone());
-        if rewritten.trim().is_empty() {
-            return Ok(vec![]);
-        }
-
-        let conn = self.connection.conn.lock().map_err(|e| {
+        let session = self.client_session(client)?;
+        let columns = {
+            let mut session = session.session.lock().map_err(|e| {
+                pgwire::error::PgWireError::ApiError(Box::new(duckdb::Error::InvalidColumnName(
+                    format!("{e}"),
+                )))
+            })?;
+            session.query_columns(&null_sql)
+        };
+        let schema = build_schema_from_columns_with_format(&columns, result_format).map_err(|e| {
             pgwire::error::PgWireError::ApiError(Box::new(duckdb::Error::InvalidColumnName(
                 format!("{e}"),
             )))
         })?;
-
-        let upper = rewritten.trim().to_uppercase();
-        if upper.starts_with("INSERT") || upper.starts_with("UPDATE") || upper.starts_with("DELETE")
-        {
-            return Ok(vec![]);
-        }
-
-        let mut stmt = match conn.prepare(&rewritten) {
-            Ok(s) => s,
-            Err(e) => {
-                rollback_after_schema_error(&conn, &rewritten, &e);
-                return Ok(vec![]);
-            }
-        };
-        if let Err(e) = stmt.execute([]) {
-            drop(stmt);
-            rollback_after_schema_error(&conn, &rewritten, &e);
-            return Ok(vec![]);
-        }
-        let column_count = stmt.column_count();
-        if column_count == 0 {
-            return Ok(vec![]);
-        }
-        let column_names = stmt.column_names();
-        let fields: Vec<FieldInfo> = (0..column_count)
-            .map(|i| {
-                let name = column_names[i].clone();
-                let pg_type =
-                    column_type_to_pg(&name, &stmt.column_type(i)).unwrap_or(Type::UNKNOWN);
-                let format = requested_format_for_type(result_format, i, &pg_type);
-                FieldInfo::new(name, None, None, pg_type, format)
-            })
-            .collect();
-        Ok(fields)
-    }
-}
-
-fn rollback_after_schema_error(conn: &duckdb::Connection, sql: &str, err: &duckdb::Error) {
-    match conn.execute_batch("ROLLBACK") {
-        Ok(_) => info!(
-            query = %sql.trim(),
-            error = %err,
-            "rolled back after schema probe error"
-        ),
-        Err(rollback_err) => debug!(
-            query = %sql.trim(),
-            error = %err,
-            rollback_error = %rollback_err,
-            "rollback after schema probe error was not needed or failed"
-        ),
+        Ok((*schema).clone())
     }
 }
 
@@ -185,12 +178,12 @@ impl NoopStartupHandler for DuckWireHandler {}
 
 #[async_trait]
 impl SimpleQueryHandler for DuckWireHandler {
-    async fn do_query<C>(&self, _client: &mut C, query: &str) -> PgWireResult<Vec<Response>>
+    async fn do_query<C>(&self, client: &mut C, query: &str) -> PgWireResult<Vec<Response>>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
         info!(query = %query.trim(), "query");
-        self.execute_query(query)
+        self.execute_query(client, query)
     }
 }
 
@@ -205,7 +198,7 @@ impl ExtendedQueryHandler for DuckWireHandler {
 
     async fn do_query<C>(
         &self,
-        _client: &mut C,
+        client: &mut C,
         portal: &Portal<Self::Statement>,
         _max_rows: usize,
     ) -> PgWireResult<Response>
@@ -223,20 +216,22 @@ impl ExtendedQueryHandler for DuckWireHandler {
         debug!(substituted = %query.trim(), "execute after param substitution");
         info!(query = %query.trim(), "extended query");
         let mut responses =
-            self.execute_query_with_format(&query, Some(&portal.result_column_format))?;
+            self.execute_query_with_format(client, &query, Some(&portal.result_column_format))?;
         Ok(responses.remove(0))
     }
 
     async fn do_describe_statement<C>(
         &self,
-        _client: &mut C,
+        client: &mut C,
         target: &StoredStatement<Self::Statement>,
     ) -> PgWireResult<DescribeStatementResponse>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
         debug!(sql = %target.statement.trim(), "describe statement");
-        let schema = self.get_query_schema(&target.statement).unwrap_or_default();
+        let schema = self
+            .get_query_schema(client, &target.statement)
+            .unwrap_or_default();
         let param_types: Vec<Type> = target
             .parameter_types
             .iter()
@@ -248,7 +243,7 @@ impl ExtendedQueryHandler for DuckWireHandler {
 
     async fn do_describe_portal<C>(
         &self,
-        _client: &mut C,
+        client: &mut C,
         target: &Portal<Self::Statement>,
     ) -> PgWireResult<DescribePortalResponse>
     where
@@ -256,11 +251,14 @@ impl ExtendedQueryHandler for DuckWireHandler {
     {
         let sql = substitute_params(&target.statement.statement, target);
         debug!(sql = %sql.trim(), "describe portal");
-        let schema =
-            match self.get_query_schema_with_format(&sql, Some(&target.result_column_format)) {
-                Ok(fields) => fields,
-                Err(_) => vec![],
-            };
+        let schema = match self.get_query_schema_with_format(
+            client,
+            &sql,
+            Some(&target.result_column_format),
+        ) {
+            Ok(fields) => fields,
+            Err(_) => vec![],
+        };
         debug!(cols = schema.len(), "describe portal response");
         Ok(DescribePortalResponse::new(schema))
     }

@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use arrow::datatypes::DataType;
 use duckdb::Connection;
 use tracing::{debug, error, info};
 
@@ -29,6 +30,51 @@ impl DuckDBSession {
             }
         }
         result
+    }
+
+    pub fn query_columns(&mut self, sql: &str) -> Vec<(String, DataType)> {
+        let rewritten = self
+            .transpiler
+            .rewrite(sql)
+            .unwrap_or_else(|_| sql.to_string());
+        if rewritten.trim().is_empty() {
+            return vec![];
+        }
+
+        let upper = rewritten.trim().to_uppercase();
+        if upper.starts_with("INSERT") || upper.starts_with("UPDATE") || upper.starts_with("DELETE")
+        {
+            return vec![];
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(&rewritten) {
+            Ok(s) => s,
+            Err(e) => {
+                drop(conn);
+                self.rollback_after_error(&rewritten, &e);
+                return vec![];
+            }
+        };
+        if let Err(e) = stmt.execute([]) {
+            drop(stmt);
+            drop(conn);
+            self.rollback_after_error(&rewritten, &e);
+            return vec![];
+        }
+
+        let column_count = stmt.column_count();
+        if column_count == 0 {
+            return vec![];
+        }
+        let column_names = stmt.column_names();
+        (0..column_count)
+            .map(|i| {
+                let name = column_names[i].clone();
+                let dt = stmt.column_type(i);
+                (name, dt)
+            })
+            .collect()
     }
 
     fn execute_inner(&mut self, sql: &str) -> Result<DuckDBQueryResult, duckdb::Error> {
