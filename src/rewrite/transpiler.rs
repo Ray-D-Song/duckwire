@@ -87,7 +87,8 @@ impl Transpiler {
     }
 
     fn rewrite_duckdb_post_transpile(&self, sql: &str) -> String {
-        let result = self.rewrite_pg_functions(sql);
+        let result = self.rewrite_array_upper(sql);
+        let result = self.rewrite_pg_functions(&result);
         let result = self.rewrite_bracketed_select_arrays(&result);
         let result = self.rewrite_unnest_column_aliases(&result);
         let result = self.rewrite_pg_pseudo_type_casts(&result);
@@ -937,6 +938,7 @@ impl Transpiler {
         result = self.rewrite_ctid_projection(&result);
         result = self.rewrite_pg_tables(&result);
         result = self.rewrite_pg_table_functions(&result);
+        result = self.rewrite_array_upper(&result);
         result = self.rewrite_pg_functions(&result);
         result = self.rewrite_pg_array_literals(&result);
         result = self.rewrite_any_array_comparisons(&result);
@@ -968,6 +970,76 @@ impl Transpiler {
         }
 
         result
+    }
+
+    fn rewrite_array_upper(&self, sql: &str) -> String {
+        let mut result = sql.to_string();
+
+        loop {
+            let upper = result.to_uppercase();
+            let Some(pos) = upper.find("ARRAY_UPPER") else {
+                break;
+            };
+            let Some(start) = Self::pg_function_call_start(&result, pos) else {
+                break;
+            };
+            let mut open = pos + "ARRAY_UPPER".len();
+            while result
+                .as_bytes()
+                .get(open)
+                .map(|b| b.is_ascii_whitespace())
+                .unwrap_or(false)
+            {
+                open += 1;
+            }
+            if result.as_bytes().get(open) != Some(&b'(') {
+                break;
+            }
+            let Some(close) = Self::find_matching_paren(&result, open) else {
+                break;
+            };
+            let inner = &result[open + 1..close];
+            let Some((array_expr, dimension)) = Self::split_top_level_comma(inner) else {
+                break;
+            };
+
+            let replacement = if dimension.trim() == "1" {
+                format!("array_length({})", array_expr.trim())
+            } else {
+                "NULL".to_string()
+            };
+            result = format!(
+                "{}{}{}",
+                &result[..start],
+                replacement,
+                &result[close + 1..]
+            );
+        }
+
+        result
+    }
+
+    fn split_top_level_comma(s: &str) -> Option<(&str, &str)> {
+        let bytes = s.as_bytes();
+        let mut paren_depth = 0i32;
+        let mut bracket_depth = 0i32;
+        let mut in_string = false;
+
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'\'' if i == 0 || bytes[i - 1] != b'\\' => in_string = !in_string,
+                b'(' if !in_string => paren_depth += 1,
+                b')' if !in_string => paren_depth -= 1,
+                b'[' if !in_string => bracket_depth += 1,
+                b']' if !in_string => bracket_depth -= 1,
+                b',' if !in_string && paren_depth == 0 && bracket_depth == 0 => {
+                    return Some((&s[..i], &s[i + 1..]));
+                }
+                _ => {}
+            }
+        }
+
+        None
     }
 
     // Finds the matching closing parenthesis for the opening paren at open_pos,
@@ -1249,6 +1321,58 @@ mod tests {
         assert!(!result.contains("current_schemas"), "Result: {result}");
         assert!(result.contains("'postgres'"), "Result: {result}");
         assert!(result.contains("'public'"), "Result: {result}");
+    }
+
+    #[test]
+    fn test_transpile_array_upper_current_schemas() {
+        let t = Transpiler::new();
+        let result = t
+            .rewrite("select array_upper(current_schemas(false), 1) as schema_count")
+            .unwrap();
+        assert!(
+            !result.to_uppercase().contains("ARRAY_UPPER"),
+            "Result: {result}"
+        );
+        assert!(
+            result.to_uppercase().contains("ARRAY_LENGTH"),
+            "Result: {result}"
+        );
+        assert!(!result.contains("current_schemas"), "Result: {result}");
+    }
+
+    #[test]
+    fn test_transpile_hstore_type_probe_array_upper() {
+        let t = Transpiler::new();
+        let result = t
+            .rewrite(
+                "SELECT pg_type.oid, typname
+                   FROM pg_catalog.pg_type
+                   LEFT JOIN (
+                     SELECT ns.oid AS nspoid, ns.nspname, r.r
+                     FROM pg_namespace AS ns
+                     JOIN (
+                       SELECT s.r, (current_schemas(false))[s.r] AS nspname
+                       FROM generate_series(1, array_upper(current_schemas(false), 1)) AS s(r)
+                     ) AS r USING (nspname)
+                   ) AS sp ON sp.nspoid = typnamespace
+                  WHERE typname = 'hstore'
+                  ORDER BY sp.r, pg_type.oid DESC
+                  LIMIT 1",
+            )
+            .unwrap();
+        assert!(
+            !result.to_uppercase().contains("ARRAY_UPPER"),
+            "Result: {result}"
+        );
+        assert!(
+            result.to_uppercase().contains("ARRAY_LENGTH"),
+            "Result: {result}"
+        );
+        assert!(result.contains("pg_compat.pg_type"), "Result: {result}");
+        assert!(
+            result.contains("pg_compat.pg_namespace"),
+            "Result: {result}"
+        );
     }
 
     #[test]

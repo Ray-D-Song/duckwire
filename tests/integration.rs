@@ -323,6 +323,37 @@ mod integration {
     }
 
     #[test]
+    fn test_hstore_type_probe_with_array_upper_executes() {
+        let mut session = make_session();
+
+        let result = session
+            .execute(
+                "SELECT pg_type.oid, typname
+                   FROM pg_catalog.pg_type
+                   LEFT JOIN (
+                     SELECT ns.oid AS nspoid, ns.nspname, r.r
+                     FROM pg_namespace AS ns
+                     JOIN (
+                       SELECT s.r, (current_schemas(false))[s.r] AS nspname
+                       FROM generate_series(1, array_upper(current_schemas(false), 1)) AS s(r)
+                     ) AS r USING (nspname)
+                   ) AS sp ON sp.nspoid = typnamespace
+                  WHERE typname = 'hstore'
+                  ORDER BY sp.r, pg_type.oid DESC
+                  LIMIT 1",
+            )
+            .unwrap();
+
+        match result {
+            DuckDBQueryResult::Rows { columns, data } => {
+                assert_eq!(columns.len(), 2);
+                assert!(data.len() <= 1);
+            }
+            other => panic!("Expected Rows, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_build_schema_and_encode() {
         let columns = vec![
             ("id".to_string(), DataType::Int32),
