@@ -150,27 +150,24 @@ impl DuckWireHandler {
             })?;
             session.query_columns(&null_sql)
         };
-        let schema = build_schema_from_columns_with_format(&columns, result_format).map_err(|e| {
-            pgwire::error::PgWireError::ApiError(Box::new(duckdb::Error::InvalidColumnName(
-                format!("{e}"),
-            )))
-        })?;
+        let schema =
+            build_schema_from_columns_with_format(&columns, result_format).map_err(|e| {
+                pgwire::error::PgWireError::ApiError(Box::new(duckdb::Error::InvalidColumnName(
+                    format!("{e}"),
+                )))
+            })?;
         Ok((*schema).clone())
     }
 }
 
 fn replace_params_with_null(sql: &str) -> String {
-    let mut result = sql.to_string();
-    let mut i = 1;
-    loop {
-        let placeholder = format!("${}", i);
-        if !result.contains(&placeholder) {
-            break;
+    replace_numeric_params(sql, |idx| {
+        if idx > 0 {
+            Some("NULL".to_string())
+        } else {
+            None
         }
-        result = result.replacen(&placeholder, "NULL", 1);
-        i += 1;
-    }
-    result
+    })
 }
 
 #[async_trait]
@@ -271,19 +268,76 @@ fn substitute_params(query: &str, portal: &Portal<String>) -> String {
     if portal.parameter_len() == 0 {
         return query.to_string();
     }
-    let mut result = query.to_string();
-    for i in 0..portal.parameter_len() {
+    replace_numeric_params(query, |idx| {
+        if idx == 0 || idx > portal.parameter_len() {
+            return None;
+        }
+        let param_idx = idx - 1;
         let param_type = portal
             .statement
             .parameter_types
-            .get(i)
+            .get(param_idx)
             .cloned()
             .flatten()
             .unwrap_or(Type::UNKNOWN);
-        let lit = param_to_literal(portal, i, param_type);
-        result = result.replacen(&format!("${}", i + 1), &lit, 1);
+        Some(param_to_literal(portal, param_idx, param_type))
+    })
+}
+
+fn replace_numeric_params(
+    sql: &str,
+    mut replacement: impl FnMut(usize) -> Option<String>,
+) -> String {
+    let bytes = sql.as_bytes();
+    let mut result = String::with_capacity(sql.len());
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                result.push('\'');
+                if in_string && bytes.get(i + 1) == Some(&b'\'') {
+                    result.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_string = !in_string;
+                i += 1;
+            }
+            b'$' if !in_string => {
+                let start = i + 1;
+                let mut end = start;
+                while bytes.get(end).map(|b| b.is_ascii_digit()).unwrap_or(false) {
+                    end += 1;
+                }
+
+                if end > start {
+                    let idx = sql[start..end].parse::<usize>().unwrap_or(0);
+                    if let Some(value) = replacement(idx) {
+                        result.push_str(&value);
+                    } else {
+                        result.push_str(&sql[i..end]);
+                    }
+                    i = end;
+                } else {
+                    result.push('$');
+                    i += 1;
+                }
+            }
+            _ => {
+                let ch = sql[i..].chars().next().unwrap();
+                result.push(ch);
+                i += ch.len_utf8();
+            }
+        }
     }
+
     result
+}
+
+fn quote_sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn param_to_literal(portal: &Portal<String>, idx: usize, ptype: Type) -> String {
@@ -321,23 +375,13 @@ fn param_to_literal(portal: &Portal<String>, idx: usize, ptype: Type) -> String 
                 .unwrap_or_else(|| "NULL".into())
             })
             .unwrap_or_else(|_| "NULL".into()),
-        // Fallback: treat unknown param types as strings, single-quoted with escaping.
-        // NOTE: types like JSON/UUID may be passed as TEXT by some drivers, so we
-        // escape single quotes only for known text types to avoid double-escaping.
+        // Fallback: treat unknown param types as strings. Extended-query parameters
+        // are raw values, so every string literal we inline must be SQL-escaped.
         _ => portal
             .parameter::<String>(idx, &ptype)
             .map(|v| {
-                v.map(|s| {
-                    if matches!(
-                        ptype,
-                        Type::TEXT | Type::VARCHAR | Type::NAME | Type::BPCHAR
-                    ) {
-                        format!("'{}'", s.replace('\'', "''"))
-                    } else {
-                        format!("'{}'", s)
-                    }
-                })
-                .unwrap_or_else(|| "NULL".into())
+                v.map(|s| quote_sql_string(&s))
+                    .unwrap_or_else(|| "NULL".into())
             })
             .unwrap_or_else(|_| "NULL".into()),
     }
@@ -366,5 +410,50 @@ impl PgWireServerHandlers for DuckWireHandlerFactory {
 
     fn startup_handler(&self) -> Arc<impl StartupHandler> {
         self.handler.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replace_numeric_params_uses_original_sql_only() {
+        let sql = r#"INSERT INTO logs(a, b, c) VALUES ($1, $2, $3)"#;
+        let values = [
+            quote_sql_string("ok"),
+            quote_sql_string("lambda$handleRequestWithCache'redisson-netty-3-14':272 and $3"),
+            quote_sql_string("reactor-http-epoll-9"),
+        ];
+
+        let rewritten = replace_numeric_params(sql, |idx| values.get(idx - 1).cloned());
+
+        assert!(
+            rewritten.contains("lambda$handleRequestWithCache''redisson-netty-3-14'':272 and $3"),
+            "rewritten: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("'reactor-http-epoll-9'"),
+            "rewritten: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn replace_numeric_params_ignores_placeholders_inside_sql_strings() {
+        let sql = "SELECT '$1' AS literal, $1 AS param, '中文$2' AS text";
+        let rewritten = replace_numeric_params(sql, |idx| Some(format!("param_{idx}")));
+
+        assert_eq!(
+            rewritten,
+            "SELECT '$1' AS literal, param_1 AS param, '中文$2' AS text"
+        );
+    }
+
+    #[test]
+    fn quote_sql_string_escapes_single_quotes() {
+        assert_eq!(
+            quote_sql_string("GlobalAuthFilter.java:lambda$handleRequestWithCache'redisson'"),
+            "'GlobalAuthFilter.java:lambda$handleRequestWithCache''redisson'''"
+        );
     }
 }

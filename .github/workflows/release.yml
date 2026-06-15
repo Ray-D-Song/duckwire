@@ -44,7 +44,6 @@ jobs:
           cache-to: type=gha,mode=max
 
   build:
-    if: ${{ !contains(github.ref, 'alpha') }}
     runs-on: [self-hosted, linux-x64]
     env:
       BUILD_TARGET: x86_64-unknown-linux-gnu
